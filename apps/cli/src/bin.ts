@@ -30,6 +30,23 @@ export async function runCli(options: RunCliOptions = {}): Promise<void> {
 
   switch (invocation.mode) {
     case 'profile': {
+      if (invocation.profile === 'tui') {
+        if (invocation.patches.length > 0) {
+          process.stderr.write('dsh tui: --patch is not supported; the TUI uses the web profile configuration as-is\n')
+          process.exitCode = 1
+          break
+        }
+        const loaded = await loadTuiModule()
+        if (!isTuiModule(loaded)) throw new Error('dsh tui: package does not export runTui')
+        const exitCode = await loaded.runTui({
+          args: invocation.args,
+          entrypoint: process.argv[1],
+          execArgv: process.execArgv,
+          env: process.env,
+        })
+        if (exitCode !== 0) process.exitCode = exitCode
+        break
+      }
       const { runProfile } = await import('./profile-boot.ts')
       try {
         await runProfile({
@@ -71,6 +88,31 @@ export async function runCli(options: RunCliOptions = {}): Promise<void> {
       invocation satisfies never
       throw new Error(`dsh: unhandled invocation mode ${JSON.stringify(invocation)}`)
   }
+}
+
+interface TuiModule {
+  runTui(options: {
+    readonly args: readonly string[]
+    readonly entrypoint?: string | undefined
+    readonly execArgv?: readonly string[]
+    readonly env?: NodeJS.ProcessEnv
+  }): Promise<number>
+}
+
+function isTuiModule(value: unknown): value is TuiModule {
+  return typeof value === 'object' && value !== null
+    && 'runTui' in value && typeof value.runTui === 'function'
+}
+
+/**
+ * Source launches follow the checked-out TUI; package launches use its built entry.
+ * @returns the module exporting `runTui`.
+ */
+function loadTuiModule(): Promise<unknown> {
+  const specifier = import.meta.url.endsWith('/src/bin.ts')
+    ? new URL('../../tui/src/index.ts', import.meta.url).href
+    : import.meta.resolve('@deepseek-ai/dsh-tui-app')
+  return import(specifier)
 }
 
 if (import.meta.main) {

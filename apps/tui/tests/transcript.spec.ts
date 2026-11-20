@@ -1,0 +1,300 @@
+/** Public Session event and assistant-stream projection. */
+
+import { describe, expect, it } from 'vitest'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/types'
+import type { SessionState } from '@deepseek-ai/dsh-api-session-controller/types'
+import type {
+  SessionFollowFrame,
+  SessionId,
+  SessionSummary,
+} from '@deepseek-ai/dsh-api-remotes/client'
+import {
+  applyFollowFrame,
+  applyControlFrame,
+  applySessionState,
+  applySummary,
+  initialTranscript,
+} from '../src/transcript.ts'
+
+const sessionId = brandString<SessionId>('session-test')
+
+describe('terminal transcript projection', () => {
+  it('updates the model and token counters from the live control stream', () => {
+    const state = { ...initialTranscript(), sessionId }
+    const next = applyControlFrame(state, {
+      type: 'projection', sessionId, seq: 2,
+      changes: [
+        { key: 'modelSelection', val: { next: { provider: 'p', model: 'live-model', reasoningEffort: 'high' }, lastUsed: null } },
+        { key: 'tokenUsage', val: { uncachedInputTokens: 7, outputTokens: 3, cacheReadTokens: 2 } },
+        { key: 'contextPressure', val: { pressureTokens: 400, projectedTokens: 500, contextWindow: 1000 } },
+        { key: 'contextBreakdown', val: { systemTokens: 100, toolsTokens: 200, messageTokens: 200 } },
+        { key: 'permissions', val: { currentValue: 'workspace-write' } },
+        { key: 'conversationContinuation', val: 9 },
+      ],
+    })
+    expect(next.model).toEqual({ provider: 'p', model: 'live-model', reasoningEffort: 'high' })
+    expect(next.tokens).toEqual({ input: 7, output: 3, cacheRead: 2 })
+    expect(next.context).toEqual({
+      pressureTokens: 400, projectedTokens: 500, contextWindow: 1000,
+      systemTokens: 100, toolsTokens: 200, messageTokens: 200,
+    })
+    expect(next.permission).toBe('workspace-write')
+    expect(next.retryAvailable).toBe(true)
+    expect(applyControlFrame(next, {
+      type: 'projection', sessionId: brandString<SessionId>('other-session'), seq: 4,
+      changes: [{ key: 'modelSelection', val: null }],
+    })).toBe(next)
+  })
+
+  it('projects live queue rows and completion state from Session state', () => {
+    const state = { ...initialTranscript(), sessionId }
+    const next = applySessionState(state, {
+      cursor: 4, active: true, running: true, pendingInput: [],
+      queue: [
+        {
+          id: brandString<MessageId>('queued-1'), placement: 'queued',
+          content: [{ type: 'text', text: 'later' }],
+        },
+        {
+          id: brandString<MessageId>('steer-1'), placement: 'steering',
+          content: [{ type: 'image', attachment: { name: 'shot.png' } }],
+        },
+      ],
+    } satisfies SessionState)
+    expect(next.running).toBe(true)
+    expect(next.queue).toEqual([
+      { id: 'queued-1', placement: 'queued', text: 'later', imageCount: 0, fileCount: 0, editable: true },
+      { id: 'steer-1', placement: 'steering', text: '[Image] shot.png', imageCount: 1, fileCount: 0, editable: false },
+    ])
+  })
+
+  it('projects cached title, model, and token usage from a Session summary', () => {
+    const summary = {
+      sessionId,
+      updatedAt: 1,
+      running: false,
+      blank: false,
+      cwd: '/work',
+      projections: {
+        kind: 'cached',
+        asOfSeq: 3,
+        values: {
+          title: 'Fix tests',
+          modelSelection: { next: { provider: 'deepseek', model: 'deepseek-chat' } },
+          tokenUsage: { uncachedInputTokens: 12, outputTokens: 4, cacheReadTokens: 8 },
+        },
+      },
+    } satisfies SessionSummary
+    const state = applySummary(initialTranscript(), summary)
+    expect(state.title).toBe('Fix tests')
+    expect(state.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+    expect(state.tokens).toEqual({ input: 12, output: 4, cacheRead: 8 })
+  })
+
+  it('renders user, assistant, reasoning, and tool events', () => {
+    let state = initialTranscript()
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'user/message',
+        seq: 1,
+        time: 1,
+        data: {
+          role: 'user',
+          source: { kind: 'user' },
+          content: [{ type: 'text', text: 'hello' }],
+        },
+      },
+    })
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'tool/call',
+        seq: 2,
+        time: 2,
+        data: { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{"cmd":"pwd"}' },
+      },
+    })
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'tool/result',
+        seq: 3,
+        time: 3,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            role: 'tool',
+            source: { callId: 'call-1' },
+            content: [{ type: 'text', text: '/work' }],
+          },
+        },
+      },
+    })
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'assistant/message',
+        seq: 4,
+        time: 4,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'reasoning', text: 'checking' },
+              { type: 'text', text: 'done' },
+            ],
+          },
+        },
+      },
+    })
+    expect(state.items.map(item => [item.kind, item.text, item.detail])).toEqual([
+      ['user', 'hello', undefined],
+      ['tool', '/work', '/work'],
+      ['reasoning', 'checking', undefined],
+      ['assistant', 'done', undefined],
+    ])
+    expect(state.items[1]).toMatchObject({
+      toolStatus: 'ok',
+      toolArguments: '{"cmd":"pwd"}',
+      toolOutput: '/work',
+    })
+  })
+
+  it('shows a running tool call and preserves its failed result', () => {
+    let state = applyFollowFrame(initialTranscript(), {
+      type: 'event',
+      event: {
+        type: 'tool/call', seq: 1, time: 1,
+        data: { turn: 1, step: 1, callId: 'call-fail', name: 'bash', arguments: '{"command":"false"}' },
+      },
+    })
+    expect(state.items[0]).toMatchObject({
+      kind: 'tool',
+      text: 'command: false',
+      toolStatus: 'running',
+      toolArguments: '{"command":"false"}',
+    })
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'tool/result', seq: 2, time: 2,
+        data: {
+          turn: 1, step: 1,
+          message: {
+            role: 'tool', isError: true, source: { callId: 'call-fail' },
+            content: [{ type: 'text', text: 'permission denied\nexit 1' }],
+          },
+        },
+      },
+    })
+    expect(state.items[0]).toMatchObject({
+      kind: 'tool',
+      text: 'permission denied',
+      toolStatus: 'error',
+      toolOutput: 'permission denied\nexit 1',
+    })
+  })
+
+  it('keeps image-only user messages visible as attachment markers', () => {
+    const state = applyFollowFrame(initialTranscript(), {
+      type: 'event',
+      event: {
+        type: 'user/message',
+        seq: 1,
+        time: 1,
+        data: {
+          role: 'user',
+          source: { kind: 'user' },
+          content: [{
+            type: 'image',
+            attachment: {
+              attachmentId: 'image-1',
+              mediaType: 'image/png',
+              bytes: 1,
+              width: 1,
+              height: 1,
+              name: 'shot.png',
+            },
+          }],
+        },
+      },
+    })
+    expect(state.items).toEqual([{
+      id: 'user-1',
+      kind: 'user',
+      text: '[Image 1] shot.png',
+    }])
+  })
+
+  it('accumulates live assistant deltas and clears them at settlement', () => {
+    let state = initialTranscript()
+    state = applyFollowFrame(state, {
+      type: 'assistant-stream',
+      frame: {
+        type: 'chunk',
+        attemptId: brandString<LlmAttemptId>('attempt-1'),
+        revision: 1,
+        index: 0,
+        time: 1,
+        chunk: { type: 'text-delta', text: 'hel' },
+      },
+    })
+    state = applyFollowFrame(state, {
+      type: 'assistant-stream',
+      frame: {
+        type: 'chunk',
+        attemptId: brandString<LlmAttemptId>('attempt-1'),
+        revision: 1,
+        index: 1,
+        time: 2,
+        chunk: { type: 'text-delta', text: 'lo' },
+      },
+    })
+    expect(state.items.at(-1)).toMatchObject({ kind: 'assistant', text: 'hello', transient: true })
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'assistant/message',
+        seq: 5,
+        time: 5,
+        data: {
+          turn: 1,
+          step: 1,
+          message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] },
+        },
+      },
+    })
+    expect(state.items).toEqual([{ id: 'assistant-5', kind: 'assistant', text: 'hello' }])
+  })
+
+  it('resets history and status from a snapshot', () => {
+    const frame = {
+      type: 'snapshot',
+      header: { version: 4, id: sessionId, createdAt: 1, cwd: '/work', isSeeded: false },
+      cursor: 1,
+      records: [{
+        type: 'event',
+        event: {
+          type: 'user/message',
+          seq: 1,
+          time: 1,
+          data: {
+            role: 'user',
+            source: { kind: 'user' },
+            content: [{ type: 'text', text: 'restored' }],
+          },
+        },
+      }],
+      hasMore: false,
+      projections: { asOfSeq: 1, values: { title: 'Restored' } },
+    } satisfies Extract<SessionFollowFrame, { type: 'snapshot' }>
+    const state = applyFollowFrame(initialTranscript(), frame)
+    expect(state.title).toBe('Restored')
+    expect(state.items).toEqual([{ id: 'user-1', kind: 'user', text: 'restored' }])
+  })
+})

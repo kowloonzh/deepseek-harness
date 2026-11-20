@@ -1,0 +1,49 @@
+{
+  "extends": "../../tsconfig.base.client.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types",
+    "declarationDir": "lib/types",
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../vendor/cordis"
+    },
+    {
+      "path": "../../packages/api/gateway/tsconfig.client.json"
+    },
+    {
+      "path": "../../packages/api/remotes/tsconfig.client.json"
+    },
+    {
+      "path": "../../packages/api/session-controller/tsconfig.client.json"
+    },
+    {
+      "path": "../../packages/client/connection/tsconfig.client.json"
+    },
+    {
+      "path": "../../packages/interaction/user-approval"
+    },
+    {
+      "path": "../../packages/interaction/user-questions"
+    },
+    {
+      "path": "../../packages/llm/llm"
+    },
+    {
+      "path": "../../packages/typert/registry"
+    },
+    {
+      "path": "../../packages/util/brand"
+    },
+    {
+      "path": "../../packages/util/crypto"
+    }
+  ]
+}

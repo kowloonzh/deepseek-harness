@@ -1,0 +1,94 @@
+# @deepseek-ai/dsh-tui-app
+
+[English](README.md) | 中文
+
+现有 `web` profile 的最简终端前端。`dsh tui` 通过公开的 Client Remote 接口
+连接运行中的 `dsh web` 进程。未提供 host URL 时，
+它会启动 `dsh web --no-open`，并连接该进程
+输出的带 token 的 URL。自启动 host 使用可用的 loopback 端口，
+因此不会与已经运行在 `3080` 的 Web host 冲突。
+
+TUI 不单独维护 profile，不创建 `$DSH_HOME/profiles/tui`，
+也不复制或重写 web profile 配置。会话、模型、
+工具、审批、凭据和插件均由 web profile 的
+host 管理。
+
+当 TUI 自己启动 host 时，会应用一个内部 host-only overlay，禁用浏览器应用、
+客户端模块/HMR 链、仅浏览器使用的投影，以及 TUI 不调用的 Remote controller。
+该 overlay 同时禁用浏览器 UI 模块，因此打印出的 Web URL 是 API host，
+不能替代正常的 `dsh web` 界面。
+
+## 用法
+
+```sh
+dsh tui
+dsh tui --resume
+dsh tui --resume <session-id>
+dsh tui --prompt '<任务文本>'
+DSH_URL='http://127.0.0.1:3080/?token=...' dsh tui
+```
+
+`dsh tui --help` 输出 TUI 自身的选项。
+
+`--prompt` 在 Session 打开后直接通过 Remote prompt 调用提交文本，并在该回合
+停止运行时退出。它不依赖粘贴内容被 Enter 提交，单个 `Ctrl+C` 或 `Esc` 即可
+中止，因此启动器可以在 pane 中拉起 TUI 并注入一个任务，无需轮询屏幕。文本
+作为单个参数传入，所以仍需要交互式终端。
+
+`DSH_URL` 会按原样连接已有 host；内部精简 overlay 不会应用到该 host。
+
+退出时会打印当前 Session 的恢复命令：`dsh tui --resume <session-id>`。
+`SIGTERM` 走同一路径：恢复 alternate screen、鼠标追踪和 raw 模式，并以退出码
+143 结束，因此 pane 管理器停掉 worker 时不会留下卡死的终端。
+
+Session 建立前 TUI 先画一帧启动画面（`DeepSeek Harness` 和
+`Starting session...`），之后才画带 `Type a message or /help` 的首个完整画面。
+启动器可以把该占位符当作“输入已被接受”的稳定依据。
+
+## 功能范围
+
+首版实现：
+
+- 流式助手文本和紧凑的工具卡片；
+- 将助手 Markdown 渲染为终端标题、强调、列表、代码块和表格；
+- 支持 readline 风格 kill/yank 编辑、历史记录、取消
+  和会话滚动的多行输入；
+- 从系统剪贴板读取文本和 PNG/JPEG/WebP/GIF 图片；
+- 采用纯边框、随内容增长的输入框，状态栏位于其下方；
+- `/help`、`/new`、`/resume`、`/model`、`/compact`、`/status` 和 `/exit`（别名 `/quit`）；
+- queue/steer 投递、待处理消息管理和 Alt+Up 召回；
+- `/queue`、`/retry` 和 `/context`，分别管理待处理输入、继续失败轮次和查看上下文明细；
+- 命令和 `@path` 补全；
+- 工具审批和 `ask_user_question`；
+- 连续工具调用分组显示数量、名称和 running/failed 状态，Ctrl+O 展开每个工具的完整参数与输出；
+- 显示工作目录、模型、reasoning effort、上下文、token、权限和运行状态的紧凑状态栏。
+
+状态栏在首次发送前显示 web profile 的默认模型，并跟随 host 实时更新的模型选择、token 用量和执行状态。已提交提示词的确认响应不会把已结束的轮次重新标为运行中。
+
+指针选择、主题、通知、侧面板、会话树、分叉、
+工作树和其他 agent 后端暂不在功能范围内。
+
+`Ctrl+U`、`Ctrl+K`、`Ctrl+W` 和 `Ctrl+Y` 采用 readline 的 kill/yank 操作。
+`Shift+Enter` 插入换行。`Ctrl+V` 优先读取图片，未找到图片时回退到
+剪贴板文本。
+
+使用 `/<skill-name> [参数]` 调用允许用户触发的 skill。未匹配本地或 Host 命令的 slash 输入会作为提示词交给 web profile host，沿用 Web composer 的 skill 注入路径；自然语言中要求使用某个 skill 时，模型也可以通过 skill 工具加载。
+
+输入 `/` 会打开补全菜单，合并 TUI 本地命令、Host 命令和允许用户触发的 skill。使用上下箭头选择，Tab 补全，Enter 执行选中项。
+
+鼠标滚轮滚动上方会话记录；上下箭头仍用于输入历史和消息窗口内导航。按住鼠标左键拖选会话文本，再按 `Ctrl+C` 复制选中内容。
+
+用户消息使用整行底色块，助手正文保持普通背景。界面不渲染可见角色标记，终端原生选择复制时只包含消息正文。
+
+运行中 Enter 使用 steer，Tab 使用 queue。Ctrl+Enter 会先中断再提交。`/queue` 支持对待处理消息执行 steer、编辑和删除。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
+
+## Herdr
+
+在 Herdr pane 中，`dsh tui` 以 `dsh` 的名称上报 `idle`、`working` 或 `blocked` 状态；审批和用户提问上报 `blocked`。当 `HERDR_ENV=1` 时，上报使用继承的 `HERDR_BIN_PATH`、`HERDR_PANE_ID` 和 `HERDR_SOCKET_PATH`。上报异步执行并设有较短超时，退出时释放 pane 中的 agent 注册。Herdr 0.9.0 支持状态上报；对于本地启动的 host，0.9.2 及以上版本还会接收 `dsh tui --resume <session-id>`。通过 `DSH_URL` 建立的连接会上报状态和会话标识，但不会持久化带 token 的 URL 或恢复命令。参见 [Herdr agent 集成协议](https://herdr.dev/docs/add-herdr-support/)。
+
+## 复用 Web profile
+
+TUI 只启动或连接标准 web profile host。启动器
+使用与 `dsh web` 相同的 profile 加载器解析 `web`；TUI
+不自行组合 Cordis 插件。实现约定参见 `.agents/goals/2026-11-16-dsh-tui-profile.md`，
+其中记录了实现要求。

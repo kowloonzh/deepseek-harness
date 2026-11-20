@@ -1,0 +1,12 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`terminal prompt lifecycle > shows the default model, streams a reply, and stays idle when acceptance arrives after completion 1`] = `
+{
+  "composer": [
+    "╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮",
+    "│ ❯                                                                                                                    │",
+    "╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯",
+  ],
+  "model": "deepseek-v4-flash",
+}
+`;
