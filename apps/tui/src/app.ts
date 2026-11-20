@@ -412,13 +412,13 @@ export class TuiApp {
     }
     if (key.name === 'wheel-up') {
       this.selection = undefined
-      this.scroll.value += 3
+      this.scroll.value += 1
       this.requestRender(true)
       return
     }
     if (key.name === 'wheel-down') {
       this.selection = undefined
-      this.scroll.value = Math.max(0, this.scroll.value - 3)
+      this.scroll.value = Math.max(0, this.scroll.value - 1)
       this.requestRender(true)
       return
     }
