@@ -1078,6 +1078,9 @@ importers:
       '@deepseek-ai/dsh-client-connection':
         specifier: workspace:*
         version: link:../../packages/client/connection
+      '@deepseek-ai/dsh-commands':
+        specifier: workspace:*
+        version: link:../../packages/interaction/commands
       '@deepseek-ai/dsh-llm':
         specifier: workspace:*
         version: link:../../packages/llm/llm

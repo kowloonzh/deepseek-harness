@@ -24,6 +24,10 @@ import type {
   SessionState,
   SessionRequestId,
 } from '@deepseek-ai/dsh-api-session-controller/types'
+import type {
+  CommandExecution,
+  CommandSubmitAttachment,
+} from '@deepseek-ai/dsh-commands/types'
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import type {
@@ -56,6 +60,8 @@ export interface RemoteInteractionHandlers {
 export interface HostCommandChoice {
   readonly name: string
   readonly description: string
+  /** Whether the command declares `input.attachments`, so a composer may submit images with it. */
+  readonly attachments?: boolean
 }
 
 /** One user-invocable skill advertised for the current Session. */
@@ -225,11 +231,26 @@ export class TuiRemoteClient {
     }), 'session model selection')
   }
 
-  /** Execute a host slash command against one Session. */
-  async command(sessionId: SessionId, line: string): Promise<string | undefined> {
-    const execution = unwrap(await this.context.remote.commands.execute(sessionId, line, []), `command ${line}`)
-    if (execution === undefined) return undefined
-    return execution.result.kind === 'success' ? execution.result.text : `error: ${execution.result.text}`
+  /**
+   * Execute a host slash command against one Session.
+   * @param sessionId - receiving Session.
+   * @param line - complete slash line.
+   * @param attachments - encoded clipboard images staged for this submission; the Host
+   * rejects them for a command that does not declare `input.attachments`.
+   * @returns the command's own text and whether this line reached a command at all,
+   * or undefined when no command claims the name (a skill, for example).
+   */
+  async command(
+    sessionId: SessionId,
+    line: string,
+    attachments: readonly CommandSubmitAttachment[] = [],
+  ): Promise<CommandExecution | undefined> {
+    const execution = unwrap(
+      await this.context.remote.commands.execute(sessionId, line, attachments),
+      `command ${line}`,
+    )
+    if (execution === undefined || execution.result.kind === 'success') return execution
+    return { ...execution, result: { kind: 'error', text: `error: ${execution.result.text}` } }
   }
 
   /** List Host slash commands visible to this Session. */
@@ -238,6 +259,7 @@ export class TuiRemoteClient {
     return commands.map(command => ({
       name: command.name,
       description: command.description,
+      ...(command.input?.attachments === true ? { attachments: true } : {}),
     }))
   }
 

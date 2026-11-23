@@ -49,24 +49,27 @@ describe('terminal prompt lifecycle', () => {
       input.write('first')
       input.write('\u001b[13;2u')
       input.write('second')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J'))).toMatch(/first[\s\S]*second/u)
-      expect(text.slice(text.lastIndexOf('\u001b[2J'))).not.toContain('You first')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toMatch(/first[\s\S]*second/u)
+      expect((app?.screenLines() ?? []).join('\n')).not.toContain('You first')
       input.write('\u001b[117;5u')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J'))).not.toContain('second')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).not.toContain('second')
       input.write('\u001b[121;5u')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J'))).toContain('second')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toContain('second')
       input.write('\u0003')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J'))).not.toContain('first')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).not.toContain('first')
       input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J')))
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n'))
         .toContain('sending queue: Reply with a one-sentence description')
       await settled
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J'))).toContain('| idle')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toContain('| idle')
       expect(text).toContain('Event sourcing')
       expect(text).toMatch(/event.sourc/iu)
       expect(text).not.toContain('model: default')
       expect(text).not.toContain('kill/yank')
-      const finalRows = text.slice(text.lastIndexOf('\u001b[2J'))
+      // The composer only appears once a frame has been painted, so wait for the
+      // box edges before snapshotting instead of reading one unretried frame.
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toContain('╰')
+      const finalRows = (app?.screenLines() ?? []).join('\n')
         .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').split('\n')
       const top = finalRows.findIndex(row => row.startsWith('╭'))
       const bottom = finalRows.findIndex(row => row.startsWith('╰'))
@@ -81,13 +84,13 @@ describe('terminal prompt lifecycle', () => {
       await expect.poll(() => directPrompts).toEqual(['/icai analyze this'])
 
       input.write('/retry\r')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J')))
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n'))
         .toContain('No failed turn is eligible')
 
       remote.prompt = async () => { throw new Error('admission failed') }
       input.write('keep this draft\r')
-      await expect.poll(() => text.slice(text.lastIndexOf('\u001b[2J'))).toContain('admission failed')
-      expect(text.slice(text.lastIndexOf('\u001b[2J'))).toContain('keep this draft')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toContain('admission failed')
+      expect((app?.screenLines() ?? []).join('\n')).toContain('keep this draft')
       input.write('\u0003')
     } finally {
       input.write('\u0003/quit\r')
@@ -129,7 +132,7 @@ describe('terminal prompt lifecycle', () => {
       remote, hostClose: async () => {}, resume: sessionId, stdin, stdout, env: {},
       onApp: (value) => { app = value },
     })
-    const frame = (): string => text.slice(text.lastIndexOf('\u001b[2J'))
+    const frame = (): string => (app?.screenLines() ?? []).join('\n')
       .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
     try {
       await expect.poll(() => text).toContain('deepseek-v4-flash')
@@ -138,9 +141,18 @@ describe('terminal prompt lifecycle', () => {
       input.write('queued follow-up')
       input.write('\t')
       await expect.poll(frame).toContain('queued: queued follow-up')
+      // Alt+Up recalls the newest queued message into the editor instead.
       input.write('\u001b[1;3A')
       await expect.poll(frame).not.toContain('queued: queued follow-up')
       expect(frame()).toContain('queued follow-up')
+      input.write('\u0015')
+      input.write('queued follow-up')
+      input.write('\t')
+      await expect.poll(frame).toContain('queued: queued follow-up')
+      // Escape promotes the newest queued message into the running turn.
+      input.write('\u001b')
+      await expect.poll(frame).not.toContain('queued: queued follow-up')
+      expect(frame()).toContain('steer: queued follow-up')
       input.write('\u0015')
       input.write('queued follow-up')
       input.write('\t')
@@ -187,8 +199,16 @@ describe('terminal prompt lifecycle', () => {
       remote, hostClose: async () => {}, resume: sessionId, stdin, stdout, env: {},
       onApp: (value) => { app = value },
     })
-    const frame = (): string => text.slice(text.lastIndexOf('\u001b[2J'))
+    const frame = (): string => (app?.screenLines() ?? []).join('\n')
       .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+    /** Text the composer currently holds, or '' when no composer row is painted. */
+    const composerDraft = (): string => {
+      // Only the composer is drawn as a boxed row, so the left border selects it;
+      // the suggestion list also contains '❯ ' and would match a looser search.
+      const row = (app?.screenLines() ?? []).find(line => line.trimStart().startsWith('│ ❯ '))
+      if (row === undefined) return ''
+      return row.slice(row.indexOf('❯ ') + 2)
+    }
     try {
       await expect.poll(() => text).toContain('deepseek-v4-flash')
       input.write('/new')
@@ -203,7 +223,9 @@ describe('terminal prompt lifecycle', () => {
       input.write('/ic')
       await expect.poll(frame).toContain('❯ /icai Research workflow [skill]')
       input.write('\t')
-      await expect.poll(frame).toContain('/icai ')
+      // Assert the composer row itself: the suggestion list also contains "/icai",
+      // so a whole-frame containment check passes even when Tab completes nothing.
+      await expect.poll(() => composerDraft().trimStart().replace(/\s*│$/u, '').trimEnd()).toBe('/icai')
       input.write('\u0003')
     } finally {
       input.write('\u0003/quit\r')

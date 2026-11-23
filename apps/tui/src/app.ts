@@ -49,6 +49,14 @@ import {
 } from './ui.ts'
 
 const LOCAL_COMMANDS = ['help', 'new', 'resume', 'model', 'compact', 'status', 'context', 'queue', 'retry', 'exit'] as const
+/**
+ * Aliases the terminal accepts without listing them in the slash menu.
+ * `/quit` and `/q` are kept so existing habits, launcher scripts, and panes keep working.
+ */
+const LOCAL_COMMAND_ALIASES: Readonly<Record<string, (typeof LOCAL_COMMANDS)[number]>> = {
+  quit: 'exit',
+  q: 'exit',
+}
 const LOCAL_COMMAND_DESCRIPTIONS: Readonly<Record<(typeof LOCAL_COMMANDS)[number], string>> = {
   help: 'Show commands',
   new: 'Create a new session',
@@ -355,7 +363,16 @@ export class TuiApp {
       }
       if (this.scroll.value > 0) {
         this.scroll.value = 0
-        this.requestRender(true)
+        this.requestRender()
+        return
+      }
+      // A queued message is waiting for this turn to end; Escape promotes the
+      // newest one into the running turn instead of discarding it.
+      const queued = this.state.running
+        ? [...this.state.queue].reverse().find(candidate => candidate.editable)
+        : undefined
+      if (queued !== undefined) {
+        void this.steerQueueItem(queued)
         return
       }
       if (this.state.running) void this.interrupt()
@@ -393,33 +410,29 @@ export class TuiApp {
     if (key.name === 'pageup') {
       this.selection = undefined
       this.scroll.value += 10
-      this.requestRender(true)
+      this.requestRender()
       return
     }
     if (key.meta && key.name === 'up') {
       void this.recallLatestQueue()
       return
     }
-    if (key.meta && key.name === 'r') {
-      void this.retryTurn()
-      return
-    }
     if (key.name === 'pagedown') {
       this.selection = undefined
       this.scroll.value = Math.max(0, this.scroll.value - 10)
-      this.requestRender(true)
+      this.requestRender()
       return
     }
     if (key.name === 'wheel-up') {
       this.selection = undefined
       this.scroll.value += 1
-      this.requestRender(true)
+      this.requestRender()
       return
     }
     if (key.name === 'wheel-down') {
       this.selection = undefined
       this.scroll.value = Math.max(0, this.scroll.value - 1)
-      this.requestRender(true)
+      this.requestRender()
       return
     }
     if (key.name === 'mouse-other') return
@@ -813,8 +826,8 @@ export class TuiApp {
     if (this.submission !== undefined) return
     if (text === '' && images.length === 0) return
     if (this.state.sessionId === undefined) return
-    if (text.startsWith('/') && images.length > 0) {
-      this.setNotice(messages.imagesWithCommand)
+    if (text.startsWith('/') && images.length > 0 && this.localCommandName(text) !== undefined) {
+      this.setNotice(messages.imagesWithLocalCommand)
       return
     }
     if (this.queueEditId !== undefined) {
@@ -825,9 +838,9 @@ export class TuiApp {
       this.history.push(text)
       this.historyIndex = this.history.length
       this.editor.clear()
-      this.draftImages = []
       this.scroll.value = 0
-      await this.runLocalCommand(text)
+      if (this.localCommandName(text) !== undefined) await this.runTerminalCommand(text)
+      else await this.runSlashLine(text, this.state.sessionId)
       this.requestRender()
       return
     }
@@ -882,7 +895,12 @@ export class TuiApp {
     }
   }
 
-  private async runLocalCommand(line: string): Promise<void> {
+  /**
+   * Run one terminal builtin. A line whose leading token no local command owns belongs to
+   * the Host and never reaches this method.
+   * @param line - trimmed draft whose leading token names a local command.
+   */
+  private async runTerminalCommand(line: string): Promise<void> {
     const [name] = line.slice(1).split(/\s+/u, 1)
     if (name === 'help') {
       this.addSystem(messages.help)
@@ -935,14 +953,79 @@ export class TuiApp {
     }
     if (name === 'retry') {
       await this.retryTurn()
-      return
+    }
+  }
+
+  /**
+   * The local command a `/` line names, or undefined when the Host owns it (including skills).
+   * Local commands run in the terminal itself and never carry the composer's images.
+   * @param line - trimmed draft beginning with `/`.
+   * @returns the bare local command name when the line is one, else undefined.
+   */
+  private localCommandName(line: string): (typeof LOCAL_COMMANDS)[number] | undefined {
+    return terminalCommandName(line)
+  }
+
+  /**
+   * Execute one slash line whose leading token no local command owns, following
+   * {@link slashRoute}.
+   * @param line - the complete slash line.
+   * @param sessionId - Session receiving the line.
+   */
+  private async runSlashLine(line: string, sessionId: SessionId): Promise<void> {
+    const images = this.draftImages
+    switch (slashRoute(line, images.length, this.slashSuggestions)) {
+      case 'prompt':
+        await this.submitDirectPrompt(line, false, images)
+        return
+      case 'refuse':
+        this.setNotice(messages.attachmentsUnsupported(slashName(line)))
+        return
+      case 'command':
+        await this.runHostCommand(line, sessionId)
+    }
+  }
+
+  /**
+   * Run one slash line through the Host's command executor.
+   * Staged images are submitted as encoded command attachments, which only a command
+   * declaring `input.attachments` accepts. A Host error keeps them staged so the line can
+   * be corrected; a settled command consumes them exactly as a sent prompt would.
+   * @param line - the complete slash line.
+   * @param sessionId - Session receiving the line, already known to exist.
+   */
+  private async runHostCommand(line: string, sessionId: SessionId): Promise<void> {
+    const images = this.draftImages
+    const imageCount = images.length
+    if (imageCount > 0) {
+      this.submission = {
+        mode: this.state.running ? 'steer' : 'queue',
+        text: line,
+        imageCount,
+      }
+      this.requestRender()
     }
     try {
-      const result = await this.remote.command(this.state.sessionId, line)
-      if (result === undefined) await this.submitDirectPrompt(line)
-      else this.addSystem(result)
+      const result = await this.remote.command(sessionId, line, images.map(image => ({
+        type: 'image' as const,
+        mediaType: image.mediaType,
+        data: image.data,
+        name: image.name,
+      })))
+      if (result === undefined) {
+        this.submission = undefined
+        await this.submitDirectPrompt(line, false, images)
+        return
+      }
+      if (imageCount > 0) this.draftImages = []
+      if (result.result.text !== undefined) this.addSystem(result.result.text)
     } catch (error) {
       this.addError(error)
+    } finally {
+      if (imageCount > 0) {
+        this.submission = undefined
+        this.requestRender()
+      }
     }
   }
 
@@ -972,15 +1055,20 @@ export class TuiApp {
     void this.submitBootstrap()
   }
 
-  private async submitDirectPrompt(text: string, thenExit = false): Promise<void> {
+  private async submitDirectPrompt(
+    text: string,
+    thenExit = false,
+    images: readonly ClipboardImage[] = [],
+  ): Promise<void> {
     if (this.state.sessionId === undefined || this.submission !== undefined) return
     const mode = this.state.running ? 'steer' : 'queue'
-    this.submission = { mode, text, imageCount: 0 }
+    this.submission = { mode, text, imageCount: images.length }
     this.requestRender()
     try {
-      await this.remote.prompt(this.state.sessionId, [{ type: 'text', text }], mode)
+      await this.remote.prompt(this.state.sessionId, buildPromptContent(text, images), mode)
       this.history.push(text)
       this.historyIndex = this.history.length
+      if (images.length > 0) this.draftImages = []
       this.setNotice(undefined)
     } catch (error) {
       this.addError(error)
@@ -1087,7 +1175,8 @@ export class TuiApp {
       void task.finally(() => { this.subscriptions.delete(task) })
     }
     void this.refreshSlashCatalog(sessionId)
-    this.requestRender()
+    // The transcript is a different one, so nothing on screen is reusable.
+    this.requestRender(false)
   }
 
   private localSlashSuggestions(): SlashSuggestion[] {
@@ -1139,7 +1228,12 @@ export class TuiApp {
       if (commands.status === 'fulfilled') {
         for (const command of commands.value) {
           if (!merged.has(command.name)) {
-            merged.set(command.name, { ...command, source: 'command' })
+            merged.set(command.name, {
+              name: command.name,
+              description: command.description,
+              source: 'command',
+              ...(command.attachments === true ? { attachments: true } : {}),
+            })
           }
         }
       }
@@ -1240,12 +1334,18 @@ export class TuiApp {
 
   private completeInput(): void {
     if (this.input.startsWith('/') && !this.input.includes(' ')) {
-      const prefix = this.input.slice(1)
-      const match = LOCAL_COMMANDS.find(command => command.startsWith(prefix))
-      if (match !== undefined) {
-        this.editor.setText(`/${match}`)
-        this.requestRender()
-      }
+      // The catalog carries local commands, Host commands, and skills; a skill or Host
+      // command completes to its name plus a space so arguments can follow.
+      const prefix = this.input.slice(1).toLowerCase()
+      const candidate = this.visibleSlashSuggestions().find(
+        suggestion => suggestion.name.toLowerCase().startsWith(prefix),
+      ) ?? this.slashSuggestions.find(
+        suggestion => suggestion.name.toLowerCase().startsWith(prefix),
+      )
+      if (candidate === undefined) return
+      this.editor.setText(`/${candidate.name} `)
+      this.slashIndex = 0
+      this.requestRender()
       return
     }
     const at = this.input.lastIndexOf('@')
@@ -1257,7 +1357,13 @@ export class TuiApp {
     this.requestRender()
   }
 
-  private requestRender(incremental = false): void {
+  /**
+   * Schedule a repaint, repainting only changed rows unless an override asks for a full one.
+   * A full repaint clears the whole screen, which is expensive on large terminals, so
+   * only the callers that replace the screen wholesale pass `false`.
+   * @param incremental - repaint changed rows only; `false` clears and redraws everything.
+   */
+  private requestRender(incremental = true): void {
     if (!this.stopped && this.state.sessionId !== undefined) {
       const interaction = [this.overlay, ...this.queuedInteractions].find(
         item => item?.kind === 'approval' || item?.kind === 'question',
@@ -1276,15 +1382,18 @@ export class TuiApp {
       this.renderStartup()
       return
     }
+    // A queued request must keep the slower full-repaint window: upgrading an
+    // incremental wait to a full repaint would clear the screen every 8ms.
+    if (this.stopped) return
     if (!incremental) this.renderMode = 'full'
-    if (this.stopped || this.renderTimer !== undefined) return
+    if (this.renderTimer !== undefined) return
     if (incremental) this.renderMode = 'incremental'
     this.renderTimer = setTimeout(() => {
       this.renderTimer = undefined
       const mode = this.renderMode
       this.renderMode = 'full'
       this.render(mode === 'incremental')
-    }, this.renderMode === 'incremental' ? 8 : 33)
+    }, incremental ? 8 : 33)
   }
 
   /**
@@ -1320,6 +1429,15 @@ export class TuiApp {
     this.lastFrame = frame
     this.stdout.write(frame.text)
     this.stdout.write(`\u001b[${String(frame.cursorRow)};${String(frame.cursorColumn)}H\u001b[?25h`)
+  }
+
+  /**
+   * The rows currently on screen, without ANSI styling.
+   * Incremental frames write only changed rows, so this is the only complete view.
+   * @returns screen rows top to bottom, or an empty array before the first frame.
+   */
+  screenLines(): readonly string[] {
+    return this.renderer.screenLines()
   }
 
   private addSystem(text: string): void {
@@ -1415,7 +1533,7 @@ export class TuiApp {
       }
       const point = this.clampSelectionPoint(mouse.column, mouse.row, region.top, bottom)
       this.selection = { anchor: point, head: point, dragging: true }
-      this.requestRender(true)
+      this.requestRender()
       return
     }
     if (mouse.action === 'drag' && this.selection?.dragging === true) {
@@ -1423,12 +1541,12 @@ export class TuiApp {
         ...this.selection,
         head: this.clampSelectionPoint(mouse.column, mouse.row, region.top, bottom),
       }
-      this.requestRender(true)
+      this.requestRender()
       return
     }
     if (mouse.action === 'up' && mouse.button === 'left' && this.selection?.dragging === true) {
       this.selection = { ...this.selection, dragging: false }
-      this.requestRender(true)
+      this.requestRender()
     }
   }
 
@@ -1447,7 +1565,7 @@ export class TuiApp {
   private clearSelection(): void {
     if (this.selection === undefined) return
     this.selection = undefined
-    this.requestRender(true)
+    this.requestRender()
   }
 
   private async copySelection(): Promise<void> {
@@ -1574,6 +1692,57 @@ export function commitQuestionAnswer(prompt: QuestionPrompt): boolean {
   }
   prompt.resolve({ answers: prompt.answers })
   return true
+}
+
+/**
+ * The terminal's own command a `/` line names, following the aliases the menu omits.
+ * @param line - trimmed draft beginning with `/`.
+ * @returns the canonical local command name, or undefined when the Host owns the line.
+ */
+export function terminalCommandName(line: string): (typeof LOCAL_COMMANDS)[number] | undefined {
+  const name = slashName(line)
+  return LOCAL_COMMANDS.find(command => command === name) ?? LOCAL_COMMAND_ALIASES[name]
+}
+
+/** Where one slash line goes once the terminal's own commands decline it. */
+type SlashRoute =
+  /** A skill gesture is ordinary prompt text: images ride the prompt to the Host pre-step. */
+  | 'prompt'
+  /** A Host command accepts attachments only when it declares `input.attachments`. */
+  | 'command'
+  /** Nothing is dispatched, so the draft and its images stay for correction. */
+  | 'refuse'
+
+/**
+ * The bare name a slash line addresses.
+ * @param line - the complete slash line.
+ * @returns the leading token without its slash.
+ */
+export function slashName(line: string): string {
+  return line.slice(1).split(/\s+/u, 1)[0] ?? ''
+}
+
+/**
+ * Route one slash line that no terminal-local command owns. With no staged images every
+ * line goes to the Host command executor; with images, only a skill (which becomes a
+ * prompt) or a command declaring `input.attachments` may carry them, and any other name
+ * is refused so the images are never silently dropped.
+ * @param line - the complete slash line.
+ * @param imageCount - staged composer images.
+ * @param suggestions - the session's slash catalog, the only attachment declaration the
+ * terminal can see.
+ * @returns where the line goes.
+ */
+export function slashRoute(
+  line: string,
+  imageCount: number,
+  suggestions: readonly SlashSuggestion[],
+): SlashRoute {
+  if (imageCount === 0) return 'command'
+  const name = slashName(line)
+  const match = suggestions.find(candidate => candidate.name === name)
+  if (match?.source === 'skill') return 'prompt'
+  return match?.attachments === true ? 'command' : 'refuse'
 }
 
 /**

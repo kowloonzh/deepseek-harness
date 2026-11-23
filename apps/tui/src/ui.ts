@@ -72,6 +72,8 @@ export interface SlashSuggestion {
   readonly name: string
   readonly description: string
   readonly source: 'local' | 'command' | 'skill'
+  /** Host command declaring `input.attachments`; only such a name may carry composer images. */
+  readonly attachments?: boolean
 }
 
 /** Approval overlay state and its unresolved waterfall result. */

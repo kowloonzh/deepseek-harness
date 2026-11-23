@@ -1,7 +1,7 @@
 /** Raw terminal input decoding. */
 
 import { describe, expect, it } from 'vitest'
-import { buildPromptContent, decodeTerminalInput, parseTuiArguments } from '../src/app.ts'
+import { buildPromptContent, decodeTerminalInput, parseTuiArguments, slashName, slashRoute, terminalCommandName } from '../src/app.ts'
 import type { ClipboardImage } from '../src/clipboard.ts'
 
 describe('raw terminal input', () => {
@@ -103,5 +103,48 @@ describe('raw terminal input', () => {
     expect(buildPromptContent('', [image])).toEqual([
       { type: 'image', mediaType: 'image/png', data: 'AAAA', name: 'shot.png' },
     ])
+  })
+})
+
+describe('slash line routing with staged images', () => {
+  const catalog = [
+    { name: 'vision', description: 'Describe an image', source: 'command' as const, attachments: true },
+    { name: 'compact', description: 'Compact history', source: 'command' as const },
+    { name: 'icai', description: 'Research workflow', source: 'skill' as const },
+  ]
+
+  it('reads the leading token of a slash line', () => {
+    expect(slashName('/vision 这张图是什么')).toBe('vision')
+    expect(slashName('/compact')).toBe('compact')
+    expect(slashName('/')).toBe('')
+  })
+
+  it('treats the quit aliases as terminal commands rather than Host lines', () => {
+    // localCommandName decides the split; a missed alias sends /quit to the Host and
+    // the terminal can never exit.
+    expect(terminalCommandName('/quit')).toBe('exit')
+    expect(terminalCommandName('/q')).toBe('exit')
+    expect(terminalCommandName('/exit')).toBe('exit')
+    expect(terminalCommandName('/compact')).toBe('compact')
+    expect(terminalCommandName('/icai analyze this')).toBeUndefined()
+  })
+
+  it('gives any slash line to the Host command executor when no images are staged', () => {
+    expect(slashRoute('/compact', 0, catalog)).toBe('command')
+    expect(slashRoute('/icai analyze this', 0, catalog)).toBe('command')
+    expect(slashRoute('/unknown', 0, catalog)).toBe('command')
+  })
+
+  it('sends a skill line as a prompt so its images ride the prompt', () => {
+    expect(slashRoute('/icai analyze this', 1, catalog)).toBe('prompt')
+  })
+
+  it('submits images to a command that declares attachment input', () => {
+    expect(slashRoute('/vision 这张图是什么', 1, catalog)).toBe('command')
+  })
+
+  it('refuses images for a command that does not accept them, keeping the draft', () => {
+    expect(slashRoute('/compact', 1, catalog)).toBe('refuse')
+    expect(slashRoute('/unknown', 1, catalog)).toBe('refuse')
   })
 })
