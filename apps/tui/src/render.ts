@@ -199,9 +199,20 @@ export class TerminalRenderer {
       options.slashLoading === true,
       width,
     )
-    const dockLimit = Math.max(0, Math.min(6, height - composer.lines.length - 5))
+    // The frame must occupy exactly `height` rows. A row count that overshoots scrolls the
+    // terminal, which shifts every row away from the row index an incremental repaint
+    // addresses and paints transcript content over the composer.
+    //
+    // Allocation order is by what the operator can least afford to lose: the composer
+    // (already capped at height - 7), then the slash menu, then the queue dock, then the
+    // transcript. Each later section takes only what is left over.
+    const chromeRows = 4
+    const visibleComposer = composer.lines.slice(0, Math.max(1, height - chromeRows))
+    const composerRows = visibleComposer.length
+    const slashRows = Math.min(slashMenu.length, Math.max(0, height - chromeRows - composerRows))
+    const dockLimit = Math.max(0, Math.min(6, height - chromeRows - composerRows - slashRows))
     const dock = queueDockLines(options.state.queue, options.submission, width, dockLimit)
-    const bodyHeight = Math.max(1, height - 4 - composer.lines.length - dock.length - slashMenu.length)
+    const bodyHeight = Math.max(0, height - chromeRows - composerRows - dock.length - slashRows)
     const transcriptPadding = options.overlay === undefined ? TRANSCRIPT_LEFT_PADDING : 0
     const body = options.overlay === undefined
       ? this.cachedTranscriptLines(options, Math.max(8, width - transcriptPadding))
@@ -216,17 +227,23 @@ export class TerminalRenderer {
     const status = statusLine(options.state, width, options.notice, scroll)
     const paddedBody = visible.map(line => fitAnsi(`${' '.repeat(transcriptPadding)}${line}`, width))
     const selectedBody = highlightSelection(paddedBody, 2, options.selection, width)
+    // The menu loses rows before the frame can overflow; the highlighted row stays visible.
+    const slashMenuStart = Math.min(
+      slashMenu.length - slashRows,
+      Math.max(0, (options.slashSuggestionIndex ?? 0) - Math.floor(slashRows / 2)),
+    )
+    const visibleSlashMenu = slashMenu.slice(slashMenuStart, slashMenuStart + slashRows)
     const lines = [
       fitAnsi(header, width),
       ...selectedBody,
-      ...slashMenu.map(line => fitAnsi(line, width)),
+      ...visibleSlashMenu.map(line => fitAnsi(line, width)),
       ...dock.map(line => fitAnsi(line, width)),
       '',
-      ...composer.lines.map(line => fitAnsi(line, width)),
+      ...visibleComposer.map(line => fitAnsi(line, width)),
       '',
       fitAnsi(status, width),
     ]
-    const composerStart = 1 + bodyHeight + slashMenu.length + dock.length + 1
+    const composerStart = 1 + bodyHeight + visibleSlashMenu.length + dock.length + 1
     const cursorRow = Math.max(1, composerStart + composer.cursorLine + 1)
     const cursorColumn = Math.min(width - 1, 5 + composer.cursorColumn)
     return {

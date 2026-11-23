@@ -9,6 +9,10 @@ import {
   wrapText,
 } from '../src/render.ts'
 import { initialTranscript } from '../src/transcript.ts'
+import type { SlashSuggestion } from '../src/ui.ts'
+
+const suggest = (count: number): SlashSuggestion[] =>
+  Array.from({ length: count }, (_, i) => ({ name: `cmd${i}`, description: 'd', source: 'command' }))
 
 describe('terminal rendering', () => {
   it('wraps CJK text by terminal cells', () => {
@@ -437,6 +441,61 @@ describe('terminal rendering', () => {
     expect(visible).not.toContain('jira.test')
     // The transcript still emits the clickable target.
     expect(raw).toContain('\u001b]8;;https://jira.test/browse/YG-4021\u001b\\')
+  })
+
+  it('never paints more rows than the terminal holds', () => {
+    // An overshooting frame scrolls the terminal, which desynchronizes the row index an
+    // incremental repaint addresses and paints transcript rows over the composer. Each
+    // section used to budget itself against `height` alone, so a slash menu plus a queue
+    // dock plus a multi-line composer together exceeded it.
+    const offenders: string[] = []
+    for (const rows of [10, 12, 16, 24, 40]) {
+      for (const columns of [40, 80]) {
+        for (const inputRows of [0, 1, 3, 6, 10]) {
+          for (const dock of [0, 1, 3, 6]) {
+            for (const slash of [0, 1, 6]) {
+              const state = initialTranscript()
+              state.items = Array.from({ length: 30 }, (_, i) => ({ id: `a${i}`, kind: 'assistant' as const, text: `line ${i}` }))
+              state.queue = Array.from({ length: dock }, (_, i) => ({
+                id: `q${i}`, placement: 'queued' as const, text: `queued ${i}`, imageCount: 0, fileCount: 0, editable: true,
+              }))
+              const input = Array.from({ length: inputRows }, (_, i) => `in${i}`).join('\n')
+              const renderer = new TerminalRenderer()
+              const frame = renderer.render({
+                rows, columns, state, input, cursor: input.length,
+                overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+                slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
+              })
+              // A full frame clears and rewrites every row, so its row count is the frame height.
+              const painted = frame.text.split('\n').length
+              if (painted !== rows) {
+                offenders.push(`rows=${String(rows)} input=${String(inputRows)} dock=${String(dock)} slash=${String(slash)} -> ${String(painted)}`)
+              }
+              if (frame.cursorRow > rows) {
+                offenders.push(`cursor rows=${String(rows)} input=${String(inputRows)} dock=${String(dock)} slash=${String(slash)} -> ${String(frame.cursorRow)}`)
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('keeps the composer visible when the slash menu cannot fit', () => {
+    // The menu gives up rows before the composer does.
+    const state = initialTranscript()
+    state.items = [{ id: 'a', kind: 'assistant', text: 'hello' }]
+    const frame = new TerminalRenderer().render({
+      rows: 10, columns: 60, state, input: 'typing', cursor: 6,
+      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      slashSuggestions: suggest(6),
+      slashSuggestionIndex: 0,
+    })
+    const rows = stripAnsi(frame.text).split('\n')
+    const composerRow = rows.findIndex(line => line.includes('typing'))
+    expect(composerRow).toBeGreaterThanOrEqual(0)
+    expect(rows.length).toBe(10)
   })
 })
 
