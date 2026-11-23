@@ -483,11 +483,27 @@ export function renderMarkdownLines(markdown: string, width: number): string[] {
   try {
     const tokens = marked.lexer(markdown, { gfm: true })
     const lines = renderMarkdownBlocks(tokens, Math.max(1, width))
-    return lines.length === 0 ? [''] : lines
+    return noControls(lines.length === 0 ? [''] : lines)
   } catch (_invalidMarkdown) {
     // Streaming can expose incomplete syntax; preserve its visible text until the next delta.
-    return wrapText(markdown, Math.max(1, width))
+    return noControls(wrapText(markdown, Math.max(1, width)))
   }
+}
+
+/**
+ * Blank every C0 control character that survived block rendering.
+ *
+ * Markdown blocks build their rows from styled characters and never run the text through
+ * `sanitize`, so a `\r`, a backspace, or a bell inside model output would reach the
+ * terminal and move the cursor: `\r` returns to column 1 so later text overwrites, and a
+ * raw line break adds a row the frame did not budget, which shifts the composer.
+ * @param lines - rendered markdown rows.
+ * @returns the same rows with control characters replaced by spaces.
+ */
+function noControls(lines: readonly string[]): string[] {
+  // ESC stays: block rendering has already emitted the styles and OSC 8 targets this row
+  // carries, and only the controls that move the cursor are a problem here.
+  return lines.map(line => line.replaceAll(/[\u0000-\u001a\u001c-\u001f\u007f]/gu, ' '))
 }
 
 function renderMarkdownBlocks(tokens: readonly Token[], width: number): string[] {
@@ -1397,7 +1413,10 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 
 /** Wrap plain text to a terminal-cell width. */
 export function wrapText(text: string, width: number): string[] {
-  const clean = sanitize(text).replaceAll('\r\n', '\n')
+  // Split before sanitizing: sanitize blanks every control character, including the line
+  // breaks that define the paragraphs here. A lone `\r` is a line break too, because tool
+  // output uses it to separate progress updates.
+  const clean = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
   if (clean === '') return ['']
   const lines: string[] = []
   for (const paragraph of clean.split('\n')) {
@@ -1407,7 +1426,7 @@ export function wrapText(text: string, width: number): string[] {
     }
     let current = ''
     let cells = 0
-    for (const char of Array.from(paragraph)) {
+    for (const char of Array.from(sanitize(paragraph))) {
       const charWidth = characterWidth(char)
       if (cells + charWidth > width && current !== '') {
         lines.push(current)
@@ -1436,7 +1455,7 @@ const ANSI_SEQUENCE_GLOBAL = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001
 function sanitize(text: string): string {
   return text
     .replaceAll(ANSI_SEQUENCE_GLOBAL, '')
-    .replaceAll(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
+    .replaceAll(/[\u0000-\u001f\u007f]/gu, ' ')
 }
 
 function boxContent(marker: string, content: string, width: number): string {

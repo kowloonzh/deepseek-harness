@@ -497,6 +497,37 @@ describe('terminal rendering', () => {
     expect(composerRow).toBeGreaterThanOrEqual(0)
     expect(rows.length).toBe(10)
   })
+
+  it('blanks control characters that would move the cursor', () => {
+    // A carriage return returns to column 1 and overwrites the row; a raw newline adds a
+    // row the frame never budgeted, which shifts the composer.
+    const hostile = ['back\bspace', 'bell\u0007x', 'carriage\rreturn', 'new\nline', 'tab\there']
+    const offenders: string[] = []
+    for (const text of hostile) {
+      for (const where of ['assistant', 'title', 'notice', 'tool'] as const) {
+        const state = initialTranscript()
+        if (where === 'assistant') state.items = [{ id: 'a', kind: 'assistant', text }]
+        if (where === 'tool') {
+          state.items = [{ id: 't', kind: 'tool', text, toolName: 'bash', toolOutput: text, toolStatus: 'ok' } as never]
+        }
+        if (where === 'title') state.title = text
+        const frame = new TerminalRenderer().render({
+          rows: 20, columns: 80, state, input: '', cursor: 0,
+          overlay: undefined, expandedTools: true, scroll: 0,
+          notice: where === 'notice' ? text : undefined,
+        })
+        // Strip the renderer's own escapes, then look for any remaining control character.
+        const visible = stripAnsi(frame.text)
+        if (visible.split('\n').length !== 20) {
+          offenders.push(`${where}: ${JSON.stringify(text)} -> ${String(visible.split('\n').length)} rows`)
+        }
+        for (const line of visible.split('\n')) {
+          if (/[\u0000-\u001f\u007f]/u.test(line)) offenders.push(`${where}: ${JSON.stringify(text)} leaked a control character`)
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
 })
 
 function stripAnsi(value: string): string {
