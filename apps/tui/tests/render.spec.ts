@@ -318,8 +318,51 @@ describe('terminal rendering', () => {
     expect(rendered).not.toContain('```')
     expect(raw.join('\n')).toContain('\u001b[1m粗体')
   })
+
+  it('wraps Markdown links in terminal hyperlink escape sequences', () => {
+    const url = 'https://jira.qianxin-inc.cn/browse/YG-4021'
+    const raw = renderMarkdownLines(`[YG-4021](${url})`, 80).join('\n')
+
+    expect(raw).toContain(`\u001b]8;;${url}\u001b\\\u001b[4;34mYG-4021\u001b]8;;\u001b\\`)
+    expect(stripAnsi(raw)).toBe('YG-4021')
+  })
+
+  it('does not emit terminal hyperlinks for unsupported Markdown URL schemes', () => {
+    const raw = renderMarkdownLines('[unsafe](javascript:alert(1))', 80).join('\n')
+
+    expect(raw).not.toContain('\u001b]8;;')
+    expect(stripAnsi(raw)).toBe('unsafe')
+  })
+
+  it('keeps terminal hyperlinks inside table cells', () => {
+    const url = 'https://jira.qianxin-inc.cn/browse/YG-4021'
+    const markdown = ['| 问题 | 状态 |', '| --- | --- |', `| [YG-4021](${url}) | open |`].join('\n')
+    const raw = renderMarkdownLines(markdown, 80).join('\n')
+
+    expect(raw).toContain(`\u001b]8;;${url}\u001b\\`)
+    expect(stripAnsi(raw)).toContain('YG-4021')
+    // The status column stays unlinked, so the target must be closed before it.
+    const cellLine = stripAnsi(raw).split('\n').find(line => line.includes('YG-4021')) ?? ''
+    expect(cellLine).toContain('open')
+  })
+
+  it('closes an open hyperlink when a narrow table cell has to truncate it', () => {
+    const url = 'https://jira.qianxin-inc.cn/browse/YG-4021'
+    const markdown = ['| 编号 |', '| --- |', `| [YG-4021 很长的一个标题](${url}) |`].join('\n')
+    // One column with a 12-cell budget forces the cell to truncate.
+    const raw = renderMarkdownLines(markdown, 12).join('\n')
+
+    // A truncated linked cell still opens and closes its target around the visible text.
+    expect(raw).toContain('\u001b]8;;')
+    expect(raw).toContain('…')
+    const opened = raw.split('\u001b]8;;').length - 1
+    expect(opened % 2).toBe(0)
+  })
 })
 
 function stripAnsi(value: string): string {
-  return value.replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+  return value.replaceAll(
+    /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu,
+    '',
+  )
 }

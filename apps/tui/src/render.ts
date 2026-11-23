@@ -1,5 +1,6 @@
 /** Deterministic full-screen ANSI renderer for the terminal frontend. */
 
+import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { marked, type Token, type Tokens } from 'marked'
 import type {
@@ -27,7 +28,9 @@ const GREEN = `${ESC}32m`
 const TRANSCRIPT_LEFT_PADDING = 2
 const USER_BLOCK_STYLE = `${ESC}97m${ESC}48;5;238m`
 const USER_PROMPT_PREFIX = '› '
-const ANSI_SEQUENCE = /^\u001b\[[0-?]*[ -/]*[@-~]/u
+const OSC = '\u001b]'
+const ST = '\u001b\\'
+const ANSI_SEQUENCE = /^(?:\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\))/u
 
 /** One terminal cell position, using one-based screen coordinates. */
 export interface TerminalPoint {
@@ -88,6 +91,50 @@ export interface RenderViewOptions {
 }
 
 /**
+ * Append one frame's drawing facts when `DSH_TUI_DEBUG_RENDER` names a file.
+ * Records whether the frame repainted the whole screen, plus every row whose
+ * measured width disagrees with the terminal's column count.
+ * @param options - the frame's terminal dimensions and scroll offset.
+ * @param incremental - whether the caller asked for a changed-row repaint.
+ * @param fullRepaint - whether the frame fell back to a whole-screen clear.
+ * @param lines - composed screen rows.
+ * @param changedBytes - byte length of the incremental update, or 0 for a full repaint.
+ */
+function dumpRenderTrace(
+  options: RenderViewOptions,
+  incremental: boolean,
+  fullRepaint: boolean,
+  lines: readonly string[],
+  changedBytes: number,
+): void {
+  const path = process.env.DSH_TUI_DEBUG_RENDER
+  if (path === undefined || path === '') return
+  const columns = Math.max(20, options.columns)
+  const rows = Math.max(10, options.rows)
+  const wide: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const measured = displayWidth(lines[index] ?? '')
+    if (measured > columns) wide.push(`${String(index + 1)}=${String(measured)}`)
+  }
+  const record = [
+    `t=${String(Date.now())}`,
+    `mode=${incremental ? 'incremental' : 'full'}`,
+    `repaint=${fullRepaint ? 'whole-screen' : 'changed-rows'}`,
+    `cols=${String(columns)}`,
+    `rows=${String(rows)}`,
+    `lines=${String(lines.length)}`,
+    `scroll=${String(options.scroll)}`,
+    `bytes=${String(changedBytes)}`,
+    `overwide=${wide.length === 0 ? '-' : wide.join(',')}`,
+  ].join(' ')
+  try {
+    appendFileSync(path, `${record}\n`)
+  } catch (_traceWriteFailed) {
+    // Diagnostics only: an unwritable trace path must never disturb rendering.
+  }
+}
+
+/**
  * Render one complete alternate-screen frame.
  * @param options - terminal dimensions, transcript, composer, overlay, and scroll.
  * @returns frame body plus the absolute terminal cursor.
@@ -100,6 +147,15 @@ export function renderView(options: RenderViewOptions): RenderedFrame {
 export class TerminalRenderer {
   private transcriptCache: TranscriptRenderCache | undefined
   private screenCache: ScreenRenderCache | undefined
+
+  /**
+   * Rows of the most recent frame, without ANSI styling.
+   * Incremental frames write only changed rows, so this is the only complete view.
+   * @returns screen rows top to bottom, or an empty array before the first frame.
+   */
+  screenLines(): readonly string[] {
+    return (this.screenCache?.lines ?? []).map(line => stripAnsi(line))
+  }
 
   /**
    * Render one frame, optionally using changed-row updates instead of clearing the screen.
@@ -115,6 +171,7 @@ export class TerminalRenderer {
       columns: Math.max(20, options.columns),
       lines: frame.lines,
     }
+    dumpRenderTrace(options, incremental, changed === undefined, frame.lines, changed?.length ?? 0)
     return {
       ...frame,
       text: changed ?? `${ESC}2J${ESC}H${frame.lines.join('\n')}`,
@@ -141,7 +198,7 @@ export class TerminalRenderer {
       options.slashLoading === true,
       width,
     )
-    const dockLimit = Math.max(0, Math.min(4, height - composer.lines.length - 5))
+    const dockLimit = Math.max(0, Math.min(6, height - composer.lines.length - 5))
     const dock = queueDockLines(options.state.queue, options.submission, width, dockLimit)
     const bodyHeight = Math.max(1, height - 4 - composer.lines.length - dock.length - slashMenu.length)
     const transcriptPadding = options.overlay === undefined ? TRANSCRIPT_LEFT_PADDING : 0
@@ -394,6 +451,7 @@ interface InlineStyle {
 interface StyledChar {
   readonly char: string
   readonly style: string
+  readonly link?: string
 }
 
 /**
@@ -499,12 +557,17 @@ function inlineChars(tokens: readonly Token[], style: InlineStyle): StyledChar[]
       case 'link': {
         const link = token as Tokens.Link
         const label = link.tokens.length === 0 ? link.href : link.text
-        appendStyledText(chars, label, { ...style, link: true })
+        appendStyledText(chars, label, { ...style, link: true }, terminalLink(link.href))
         break
       }
       case 'image': {
         const image = token as Tokens.Image
-        appendStyledText(chars, `[image: ${image.text || image.href}]`, { ...style, link: true })
+        appendStyledText(
+          chars,
+          `[image: ${image.text || image.href}]`,
+          { ...style, link: true },
+          terminalLink(image.href),
+        )
         break
       }
       case 'br':
@@ -528,9 +591,33 @@ function inlineChars(tokens: readonly Token[], style: InlineStyle): StyledChar[]
   return chars
 }
 
-function appendStyledText(target: StyledChar[], text: string, style: InlineStyle): void {
+function appendStyledText(
+  target: StyledChar[],
+  text: string,
+  style: InlineStyle,
+  link?: string,
+): void {
   const sequence = inlineStyleSequence(style)
-  for (const char of Array.from(text)) target.push({ char, style: sequence })
+  for (const char of Array.from(text)) {
+    target.push(link === undefined ? { char, style: sequence } : { char, style: sequence, link })
+  }
+}
+
+/**
+ * Resolve a Markdown target to a terminal hyperlink URL.
+ * @param href - link destination from the assistant's Markdown.
+ * @returns an absolute http, https, or mailto URL, or undefined when it must stay plain text.
+ */
+function terminalLink(href: string): string | undefined {
+  try {
+    const url = new URL(href)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'mailto:') {
+      return undefined
+    }
+    return url.href
+  } catch (_invalidUrl) {
+    return undefined
+  }
 }
 
 function inlineStyleSequence(style: InlineStyle): string {
@@ -570,16 +657,24 @@ function wrapStyled(chars: readonly StyledChar[], width: number): string[] {
 
 function formatStyledLine(chars: readonly StyledChar[]): string {
   let result = ''
-  let current = ''
+  let currentStyle = ''
+  let currentLink = ''
   for (const char of chars) {
-    if (char.style !== current) {
-      if (current !== '') result += RESET
+    const link = char.link ?? ''
+    if (link !== currentLink) {
+      if (currentLink !== '') result += `${OSC}8;;${ST}`
+      if (link !== '') result += `${OSC}8;;${link}${ST}`
+      currentLink = link
+    }
+    if (char.style !== currentStyle) {
+      if (currentStyle !== '') result += RESET
       if (char.style !== '') result += char.style
-      current = char.style
+      currentStyle = char.style
     }
     result += char.char
   }
-  return current === '' ? result : `${result}${RESET}`
+  if (currentLink !== '') result += `${OSC}8;;${ST}`
+  return currentStyle === '' ? result : `${result}${RESET}`
 }
 
 function codeBlockLines(code: Tokens.Code, width: number): string[] {
@@ -645,11 +740,51 @@ function tableRow(
 ): string {
   const values = widths.map((width, index) => {
     const cell = cells[index]
-    const value = fit(plainInline(cell?.tokens ?? []), width)
-    const aligned = alignCell(value, width, cell?.align ?? aligns[index] ?? 'left')
-    return header ? `${BOLD}${aligned}${RESET}` : aligned
+    const chars = padCell(fitChars(inlineChars(cell?.tokens ?? [], {}), width), width, cell?.align ?? aligns[index] ?? 'left')
+    if (!header) return formatStyledLine(chars)
+    return `${BOLD}${formatStyledLine(chars)}${RESET}`
   })
   return values.join(` ${DIM}│${RESET} `)
+}
+
+/**
+ * Truncate one cell's styled characters to its column width, keeping each character's
+ * terminal link. A cell that overflows ends in an ellipsis, so a linked value cannot be
+ * silently shortened without a visible marker.
+ * @param chars - the cell's inline characters with their styles and links.
+ * @param width - the column width in terminal cells.
+ * @returns characters whose displayed width is at most `width`.
+ */
+function fitChars(chars: readonly StyledChar[], width: number): StyledChar[] {
+  if (chars.reduce((sum, char) => sum + characterWidth(char.char), 0) <= width) return [...chars]
+  const kept: StyledChar[] = []
+  let cells = 0
+  for (const char of chars) {
+    const charWidth = characterWidth(char.char)
+    if (cells + charWidth > width - 1) break
+    kept.push(char)
+    cells += charWidth
+  }
+  kept.push({ char: '…', style: '' })
+  return kept
+}
+
+/**
+ * Pad a cell's characters to its column width on the requested side.
+ * @param chars - characters already fitted to the column.
+ * @param width - the column width in terminal cells.
+ * @param align - cell, column, or default left alignment.
+ * @returns characters plus trailing spaces reaching exactly `width` cells.
+ */
+function padCell(chars: readonly StyledChar[], width: number, align: 'center' | 'left' | 'right'): StyledChar[] {
+  const remaining = Math.max(0, width - chars.reduce((sum, char) => sum + characterWidth(char.char), 0))
+  const left = align === 'right' ? remaining : align === 'center' ? Math.floor(remaining / 2) : 0
+  const right = remaining - left
+  return [
+    ...Array.from({ length: left }, () => ({ char: ' ', style: '' })),
+    ...chars,
+    ...Array.from({ length: right }, () => ({ char: ' ', style: '' })),
+  ]
 }
 
 function tableFallbackLines(table: Tokens.Table, width: number): string[] {
@@ -660,16 +795,6 @@ function tableFallbackLines(table: Tokens.Table, width: number): string[] {
     }).join(' · ')
     return fit(value, width)
   })
-}
-
-function alignCell(value: string, width: number, align: 'center' | 'left' | 'right'): string {
-  const remaining = Math.max(0, width - displayWidth(value))
-  if (align === 'right') return `${' '.repeat(remaining)}${value}`
-  if (align === 'center') {
-    const left = Math.floor(remaining / 2)
-    return `${' '.repeat(left)}${value}${' '.repeat(remaining - left)}`
-  }
-  return `${value}${' '.repeat(remaining)}`
 }
 
 function plainInline(tokens: readonly Token[]): string {
@@ -736,12 +861,13 @@ function toolGroupLines(items: readonly TranscriptItem[], expanded: boolean, wid
     const styled = color === '' ? summary.text : `${color}${summary.text}${RESET}`
     return `  ${fitAnsi(styled, Math.max(1, width - 2))}`
   })
+  // Collapsed keeps one row per summary. Expanded replaces the summaries with the
+  // per-call details, so the same work is never listed twice.
   if (!expanded) {
     lines.push(`  ${DIM}${fit(messages.showToolDetails, Math.max(1, width - 2))}${RESET}`)
     return lines
   }
-  lines.push(...items.flatMap(item => toolLines(item, true, width).map(line => `  ${line}`)))
-  return lines
+  return items.flatMap(item => toolLines(item, true, width).map(line => `  ${line}`))
 }
 
 interface ToolSummary {
@@ -982,12 +1108,12 @@ function queueDockLines(
   const budget = Math.max(0, 3 - lines.length)
   for (const item of queue.slice(0, budget)) {
     const kind = item.placement === 'steering' ? 'steer' : 'queued'
+    // The hint rides on the message itself so it stays visible however many are pending.
     lines.push(`${DIM}${fit(`${kind}: ${item.text || '[attachment]'}`, width)}${RESET}`)
+    lines.push(`${DIM}${fit('   Esc send now · Alt+Up recall · /queue manage', width)}${RESET}`)
   }
   if (queue.length > budget) {
     lines.push(`${DIM}${fit(`${String(queue.length - budget)} more pending · /queue manage`, width)}${RESET}`)
-  } else if (queue.length > 0) {
-    lines.push(`${DIM}${fit('Alt+Up recall · /queue manage', width)}${RESET}`)
   }
   return lines.slice(0, limit)
 }
@@ -1295,8 +1421,16 @@ function fit(text: string, width: number): string {
   return `${result}…`
 }
 
+/**
+ * Truncate ANSI-styled text to a terminal width without cutting an OSC 8 hyperlink open,
+ * which would leave every following cell pointing at a stale target.
+ * @param text - styled text, possibly carrying terminal hyperlinks.
+ * @param width - available terminal cells.
+ * @returns the original text when it fits, else truncated text with every link closed.
+ */
 function fitAnsi(text: string, width: number): string {
-  return displayWidth(stripAnsi(text)) <= width ? text : `${fit(stripAnsi(text), width)}${RESET}`
+  if (displayWidth(stripAnsi(text)) <= width) return text
+  return `${fit(stripAnsi(text), width)}${OSC}8;;${ST}${RESET}`
 }
 
 function displayWidth(text: string): number {
@@ -1319,9 +1453,11 @@ function characterWidth(char: string): number {
   ) ? 2 : 1
 }
 
-function stripAnsi(text: string): string {
-  return text.replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+export function stripAnsi(text: string): string {
+  return text.replaceAll(ANSI_SEQUENCE_GLOBAL, '')
 }
+
+const ANSI_SEQUENCE_GLOBAL = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu
 
 function compact(value: number): string {
   if (value < 1_000) return String(value)
