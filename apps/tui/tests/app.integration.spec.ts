@@ -83,7 +83,8 @@ describe('terminal prompt lifecycle', () => {
       await expect.poll(() => (app?.screenLines() ?? []).join('\n'))
         .toContain('sending queue: Reply with a one-sentence description')
       await settled
-      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toContain('| idle')
+      // The status row marks a running turn and drops the marker when the turn settles.
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).not.toContain('| running')
       expect(text).toContain('Event sourcing')
       expect(text).toMatch(/event.sourc/iu)
       expect(text).not.toContain('model: default')

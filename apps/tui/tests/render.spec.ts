@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  cacheHitPercent,
   renderMarkdownLines,
   renderView,
   selectedText,
@@ -91,7 +92,8 @@ describe('terminal rendering', () => {
     const bottom = lines.findIndex(line => line.startsWith('╰─'))
     expect(top).toBeGreaterThan(0)
     expect(bottom - top).toBeGreaterThanOrEqual(4)
-    expect(lines.at(-1)).toContain('| idle')
+    // Idle is no longer a permanent marker; the status row still owns the last line.
+    expect(lines.at(-1)).toContain('~')
     expect(lines.at(-1)).toContain('|')
     expect(lines[top + 1]).toContain('[Image #1] shot.png')
     expect(lines[top + 2]).toContain('next line')
@@ -125,6 +127,8 @@ describe('terminal rendering', () => {
     state.model = { provider: 'p', model: 'model-x', reasoningEffort: 'high' }
     state.context = { pressureTokens: 400, projectedTokens: 500, contextWindow: 1000 }
     state.permission = 'workspace-write'
+    // Cache share is the reading this row keeps; 2 of 10 billed prompt tokens were cached.
+    state.tokens = { input: 6, output: 3, cacheRead: 2, cacheWrite: 2 }
     state.queue = [
       { id: 'q1', placement: 'queued', text: 'later', imageCount: 0, fileCount: 0, editable: true },
       { id: 'q2', placement: 'steering', text: 'adjust course', imageCount: 0, fileCount: 0, editable: true },
@@ -140,7 +144,9 @@ describe('terminal rendering', () => {
     const status = stripAnsi(frame.text).split('\n').at(-1) ?? ''
     expect(status).toContain('model-x:high')
     expect(status).toContain('ctx 50%')
-    expect(status).toContain('workspace-write')
+    // The permission mode moved to `/status`; cache share took its place on the row.
+    expect(status).not.toContain('workspace-write')
+    expect(status).toContain('cache 20%')
   })
 
   it('groups consecutive tool calls and expands individual details with Ctrl+O', () => {
@@ -527,6 +533,15 @@ describe('terminal rendering', () => {
       }
     }
     expect(offenders).toEqual([])
+  })
+
+  it('reports cache share over every billed prompt bucket', () => {
+    // Denominator matches the Web composer: uncached input plus cache read plus cache write.
+    expect(cacheHitPercent({ input: 6, output: 1, cacheRead: 2, cacheWrite: 2 })).toBe(20)
+    expect(cacheHitPercent({ input: 0, output: 1, cacheRead: 10, cacheWrite: 0 })).toBe(100)
+    // Nothing billed yet: no percentage rather than a division by zero.
+    expect(cacheHitPercent({ input: 0, output: 5, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
+    expect(cacheHitPercent(undefined)).toBeUndefined()
   })
 })
 

@@ -32,9 +32,13 @@ export interface TranscriptItem {
 
 /** Token counters shown in the status line. */
 export interface TokenStatus {
+  /** Prompt-side input that missed the cache and was billed in full. */
   readonly input: number
   readonly output: number
+  /** Prompt-side input served from the provider's cache. */
   readonly cacheRead: number
+  /** Prompt-side input written into the provider's cache. */
+  readonly cacheWrite: number
 }
 
 /** Model identity shown in the status line. */
@@ -160,6 +164,7 @@ function applyProjectionValues(state: TranscriptState, values: unknown): Transcr
   const input = usage === undefined ? undefined : numberValue(usage.uncachedInputTokens) ?? numberValue(usage.inputTokens)
   const output = usage === undefined ? undefined : numberValue(usage.outputTokens)
   const cacheRead = usage === undefined ? undefined : numberValue(usage.cacheReadTokens)
+  const cacheWrite = usage === undefined ? undefined : numberValue(usage.cacheWriteTokens)
   const limitsValue = recordValue(values.imageLimits)
   const maxImageBytes = limitsValue === undefined ? undefined : numberValue(limitsValue.maxImageBytes)
   const maxImagesPerMessage = limitsValue === undefined ? undefined : numberValue(limitsValue.maxImagesPerMessage)
@@ -180,7 +185,7 @@ function applyProjectionValues(state: TranscriptState, values: unknown): Transcr
       : { model: { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) } }),
     ...(input === undefined || output === undefined
       ? {}
-      : { tokens: { input, output, cacheRead: cacheRead ?? 0 } }),
+      : { tokens: { input, output, cacheRead: cacheRead ?? 0, cacheWrite: cacheWrite ?? 0 } }),
     ...(maxImageBytes === undefined || maxImagesPerMessage === undefined || maxMessageImageBytes === undefined
       ? {}
       : { imageLimits: { maxImageBytes, maxImagesPerMessage, maxMessageImageBytes } }),

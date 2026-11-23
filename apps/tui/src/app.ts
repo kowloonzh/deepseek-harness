@@ -20,6 +20,7 @@ import { runShellLine, shellLine, shellResultText } from './shell.ts'
 import { HerdrReporter } from './herdr.ts'
 import { TuiError } from './error.ts'
 import {
+  cacheHitPercent,
   selectedText,
   TerminalRenderer,
   type RenderedFrame,
@@ -1190,7 +1191,9 @@ export class TuiApp {
     const model = this.state.model === undefined ? '(default)' : `${this.state.model.provider}/${this.state.model.model}`
     const tokens = this.state.tokens === undefined
       ? 'unavailable'
-      : `${String(this.state.tokens.input)} input, ${String(this.state.tokens.output)} output, ${String(this.state.tokens.cacheRead)} cache read`
+      : `${String(this.state.tokens.input)} input, ${String(this.state.tokens.output)} output, `
+        + `${String(this.state.tokens.cacheRead)} cache read, ${String(this.state.tokens.cacheWrite)} cache write`
+    const cache = cacheHitPercent(this.state.tokens)
     this.addSystem([
       `${messages.statusLabels.session}: ${session}`,
       `${messages.statusLabels.title}: ${this.state.title}`,
@@ -1198,6 +1201,7 @@ export class TuiApp {
       `${messages.statusLabels.model}: ${model}`,
       `${messages.statusLabels.effort}: ${this.state.model?.reasoningEffort ?? '(default)'}`,
       `${messages.statusLabels.tokens}: ${tokens}`,
+      `${messages.statusLabels.cacheHit}: ${cache === undefined ? '(no billed input yet)' : `${String(cache)}%`}`,
       `${messages.statusLabels.context}: ${this.contextSummary()}`,
       `${messages.statusLabels.permission}: ${this.state.permission ?? '(unknown)'}`,
       `${messages.statusLabels.state}: ${this.state.running ? 'running' : 'idle'}`,

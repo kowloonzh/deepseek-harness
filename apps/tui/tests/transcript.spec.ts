@@ -34,7 +34,7 @@ describe('terminal transcript projection', () => {
       ],
     })
     expect(next.model).toEqual({ provider: 'p', model: 'live-model', reasoningEffort: 'high' })
-    expect(next.tokens).toEqual({ input: 7, output: 3, cacheRead: 2 })
+    expect(next.tokens).toEqual({ input: 7, output: 3, cacheRead: 2, cacheWrite: 0 })
     expect(next.context).toEqual({
       pressureTokens: 400, projectedTokens: 500, contextWindow: 1000,
       systemTokens: 100, toolsTokens: 200, messageTokens: 200,
@@ -89,7 +89,7 @@ describe('terminal transcript projection', () => {
     const state = applySummary(initialTranscript(), summary)
     expect(state.title).toBe('Fix tests')
     expect(state.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
-    expect(state.tokens).toEqual({ input: 12, output: 4, cacheRead: 8 })
+    expect(state.tokens).toEqual({ input: 12, output: 4, cacheRead: 8, cacheWrite: 0 })
   })
 
   it('renders user, assistant, reasoning, and tool events', () => {

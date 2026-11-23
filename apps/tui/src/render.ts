@@ -1178,6 +1178,23 @@ function queueDockLines(
   return lines.slice(0, limit)
 }
 
+/**
+ * Share of prompt-side input served from the provider cache.
+ *
+ * Cache reads are billed at a fraction of uncached input, so this reading is the one number
+ * in the status line that implies an action: a sustained drop means the prompt prefix is
+ * changing, which raises cost. The denominator matches the Web composer's figure — every
+ * prompt-side bucket, not just the uncached one.
+ * @param tokens - session token counters, or undefined before the first response.
+ * @returns an integer percentage, or undefined when nothing has been billed yet.
+ */
+export function cacheHitPercent(tokens: TranscriptState['tokens']): number | undefined {
+  if (tokens === undefined) return undefined
+  const billed = tokens.input + tokens.cacheRead + tokens.cacheWrite
+  if (billed <= 0) return undefined
+  return Math.min(100, Math.round((tokens.cacheRead / billed) * 100))
+}
+
 function statusLine(
   state: TranscriptState,
   width: number,
@@ -1189,18 +1206,20 @@ function statusLine(
     ? messages.defaultModel
     : `${state.model.model}${state.model.reasoningEffort === undefined ? '' : `:${state.model.reasoningEffort}`}`
   const context = contextPercent(state)
-  const usage = state.tokens === undefined
-    ? ''
-    : ` | ${compact(state.tokens.input)} in / ${compact(state.tokens.output)} out`
-  const permission = state.permission === undefined ? '' : ` | ${state.permission}`
+  // Token totals, the permission mode, and the idle flag live in `/status`: they change
+  // slowly, and keeping them here crowded out the two readings that move during work.
+  const cache = cacheHitPercent(state.tokens)
+  const cacheReading = cache === undefined ? '' : ` | cache ${String(cache)}%`
   const activeTool = state.items.findLast(item => item.kind === 'tool' && item.toolStatus === 'running')
   const activity = activeTool === undefined ? '' : ` | ${activeTool.title ?? messages.tool} running`
-  const runState = state.running ? messages.running : messages.idle
   const bottom = scroll > 0 ? ' | ↓ bottom · Esc' : ''
-  const base = `${cwd} | ${model}${context}${usage}${permission}${activity} | ${runState}${bottom}`
+  // A running turn is the one state worth a permanent marker; the idle flag only restated
+  // that nothing was happening, so it left the line for `/status`.
+  const runState = state.running ? ` | ${messages.running}` : ''
+  const base = `${cwd} | ${model}${context}${cacheReading}${activity}${runState}${bottom}`
   if (bottom !== '' && (notice === undefined || notice === '')) {
-    const tail = `${activity} | ${runState}${bottom}`
-    const head = `${cwd} | ${model}${context}${usage}${permission}`
+    const tail = `${activity}${bottom}`
+    const head = `${cwd} | ${model}${context}${cacheReading}`
     return `${DIM}${fit(head, Math.max(1, width - displayWidth(tail)))}${tail}${RESET}`
   }
   if (notice === undefined || notice === '') return `${DIM}${fit(base, width)}${RESET}`
@@ -1568,11 +1587,4 @@ function characterWidth(char: string): number {
 
 export function stripAnsi(text: string): string {
   return text.replaceAll(ANSI_SEQUENCE_GLOBAL, '')
-}
-
-
-function compact(value: number): string {
-  if (value < 1_000) return String(value)
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}k`
-  return `${(value / 1_000_000).toFixed(1)}m`
 }

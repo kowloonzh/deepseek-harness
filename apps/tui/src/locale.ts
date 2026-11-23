@@ -93,6 +93,7 @@ export const messages = {
     model: 'Model',
     effort: 'Reasoning',
     tokens: 'Tokens',
+    cacheHit: 'Cache hit',
     context: 'Context',
     permission: 'Permission',
     pressure: 'Pressure',
