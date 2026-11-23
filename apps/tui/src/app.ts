@@ -16,6 +16,7 @@ import { readClipboard, writeClipboardText, type ClipboardImage } from './clipbo
 import { TuiRemoteClient } from './remote.ts'
 import { localized, messages } from './locale.ts'
 import { ReadlineEditor } from './readline.ts'
+import { runShellLine, shellLine, shellResultText } from './shell.ts'
 import { HerdrReporter } from './herdr.ts'
 import { TuiError } from './error.ts'
 import {
@@ -830,6 +831,20 @@ export class TuiApp {
       this.setNotice(messages.imagesWithLocalCommand)
       return
     }
+    const shell = shellLine(text)
+    if (shell !== undefined) {
+      if (images.length > 0) {
+        this.setNotice(localized.shellImagesUnsupported)
+        return
+      }
+      this.history.push(text)
+      this.historyIndex = this.history.length
+      this.editor.clear()
+      this.scroll.value = 0
+      await this.runShell(shell.command)
+      this.requestRender()
+      return
+    }
     if (this.queueEditId !== undefined) {
       await this.commitQueueEdit(rawText.trim())
       return
@@ -892,6 +907,27 @@ export class TuiApp {
       this.setNotice(messages.queueEditSaved)
     } catch (error) {
       this.addError(error)
+    }
+  }
+
+  /**
+   * Run one `!` line in this process and print what it produced.
+   *
+   * The command never reaches the Host or the model, so its output is transcript text
+   * only. A non-zero exit is still a finished command: the status line carries the code
+   * and nothing here raises a notice.
+   * @param command - the shell command line after the leading `!`.
+   */
+  private async runShell(command: string): Promise<void> {
+    this.setNotice(localized.shellRunning(command))
+    try {
+      const result = await runShellLine(command, { cwd: process.cwd() })
+      this.addSystem(shellResultText(command, result))
+    } catch (error: unknown) {
+      this.addError(error)
+    } finally {
+      this.setNotice(undefined)
+      this.requestRender()
     }
   }
 

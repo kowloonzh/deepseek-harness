@@ -20,6 +20,7 @@ export const messages = {
     '/status           show session status',
     '/<skill-name>     invoke a user-invocable skill',
     '/exit             exit (also /quit)',
+    '!<command>        run a shell command here (not sent to the model)',
   ].join('\n'),
   approvals: 'Approval required',
   allowOnce: 'Enter allow once',
@@ -106,4 +107,10 @@ export const localized = {
   imageMessageLimit: (mebibytes: number): string => `Image attachments exceed the ${String(mebibytes)} MiB prompt limit`,
   selectionCopied: (characters: number): string => `Copied ${String(characters)} characters`,
   resumeSession: (sessionId: string): string => `\nResume this session with:\ndsh tui --resume ${sessionId}\n`,
+  shellRunning: (command: string): string => `running !${command}`,
+  shellOutputTruncated: (kilobytes: number): string => `[output truncated at ${String(kilobytes)} KB]`,
+  shellTimedOut: (seconds: number): string => `[command timed out after ${String(seconds)}s]`,
+  shellSignal: (signal: string): string => `[command killed by ${signal}]`,
+  shellExitCode: (code: number): string => `[exit ${String(code)}]`,
+  shellImagesUnsupported: 'A ! command cannot carry images; remove them first',
 }
