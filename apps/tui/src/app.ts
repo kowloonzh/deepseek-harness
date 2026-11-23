@@ -36,6 +36,7 @@ import {
   type TranscriptState,
 } from './transcript.ts'
 import {
+  defaultEffortIndex,
   modelChoices,
   type ApprovalUiRequest,
   type ApprovalPrompt,
@@ -613,12 +614,25 @@ export class TuiApp {
       return
     }
     if (overlay.kind === 'models') {
-      if (key.name === 'up') overlay.index = Math.max(0, overlay.index - 1)
-      else if (key.name === 'down') overlay.index = Math.min(overlay.items.length - 1, overlay.index + 1)
+      if (overlay.stage === 'model') {
+        if (key.name === 'up') overlay.index = Math.max(0, overlay.index - 1)
+        else if (key.name === 'down') overlay.index = Math.min(overlay.items.length - 1, overlay.index + 1)
+        else if (key.name === 'return' || key.name === 'enter') this.advanceModelPicker(overlay)
+        else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) this.closeOverlay()
+        return
+      }
+      const chosen = overlay.chosen
+      const efforts = chosen?.efforts ?? []
+      if (key.name === 'up') overlay.effortIndex = Math.max(0, overlay.effortIndex - 1)
+      else if (key.name === 'down') overlay.effortIndex = Math.min(efforts.length - 1, overlay.effortIndex + 1)
       else if (key.name === 'return' || key.name === 'enter') {
-        const selected = overlay.items[overlay.index]
-        if (selected !== undefined) void this.selectModel(selected)
-      } else if (key.name === 'escape') this.closeOverlay()
+        if (chosen !== undefined) void this.selectModel(chosen, efforts[overlay.effortIndex]?.id)
+      } else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        // Back to the model stage keeps the highlighted route in place.
+        overlay.stage = 'model'
+        overlay.effortIndex = 0
+        this.requestRender()
+      }
       return
     }
     if (overlay.kind === 'queue') {
@@ -968,6 +982,8 @@ export class TuiApp {
         kind: 'models',
         items: modelChoices(await this.remote.modelCatalog()),
         index: 0,
+        stage: 'model',
+        effortIndex: 0,
       }
       return
     }
@@ -1182,13 +1198,49 @@ export class TuiApp {
     return `${String(percent)}% (${compactNumber(used)}/${compactNumber(context.contextWindow)})`
   }
 
-  private async selectModel(choice: ModelChoice): Promise<void> {
+  /**
+   * Advance the model stage: a route with reasoning depths moves on to the depth stage,
+   * while a route without them is selected directly because it has nothing else to choose.
+   * @param overlay - the open model picker, mutated in place.
+   */
+  private advanceModelPicker(overlay: Extract<Overlay, { kind: 'models' }>): void {
+    const selected = overlay.items[overlay.index]
+    if (selected === undefined) return
+    if (selected.efforts.length === 0) {
+      void this.selectModel(selected)
+      return
+    }
+    const current = this.state.model?.provider === selected.provider && this.state.model.model === selected.model
+      ? this.state.model.reasoningEffort
+      : undefined
+    this.overlay = {
+      ...overlay,
+      stage: 'effort',
+      chosen: selected,
+      effortIndex: defaultEffortIndex(selected, current),
+    }
+    this.requestRender()
+  }
+
+  /**
+   * Select a route and, when it accepts one, a reasoning depth.
+   * @param choice - the route.
+   * @param effort - depth identifier, or undefined to let the host apply its default.
+   */
+  private async selectModel(choice: ModelChoice, effort?: string): Promise<void> {
     if (this.state.sessionId === undefined) return
     this.closeOverlay()
     try {
-      await this.remote.selectModel(this.state.sessionId, choice.provider, choice.model)
-      this.state = { ...this.state, model: { provider: choice.provider, model: choice.model } }
-      this.addSystem(localized.selectedModel(choice.provider, choice.model))
+      await this.remote.selectModel(this.state.sessionId, choice.provider, choice.model, effort)
+      this.state = {
+        ...this.state,
+        model: {
+          provider: choice.provider,
+          model: choice.model,
+          ...(effort === undefined ? {} : { reasoningEffort: effort }),
+        },
+      }
+      this.addSystem(localized.selectedModel(choice.provider, choice.model, effort))
     } catch (error) {
       this.addError(error)
     }
@@ -2082,9 +2134,13 @@ export function catalogSummary(catalog: ModelCatalog): string {
   return choices.map(choice => `${choice.provider}/${choice.model}`).join('\n')
 }
 
-/** Model picker factory kept outside the command method for tests. */
+/**
+ * Model picker factory kept outside the command method for tests.
+ * @param catalog - host model catalog.
+ * @returns a picker at the model stage, before any route is highlighted for depth.
+ */
 export function modelPicker(catalog: ModelCatalog): ModelPicker {
-  return { kind: 'models', items: modelChoices(catalog), index: 0 }
+  return { kind: 'models', items: modelChoices(catalog), index: 0, stage: 'model', effortIndex: 0 }
 }
 
 /** Session picker factory kept outside the command method for tests. */

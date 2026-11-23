@@ -358,6 +358,53 @@ describe('terminal rendering', () => {
     const opened = raw.split('\u001b]8;;').length - 1
     expect(opened % 2).toBe(0)
   })
+
+  it('shows reasoning depths for the picked route and marks the host default', () => {
+    const state = initialTranscript()
+    const choice = {
+      provider: 'deepseek',
+      providerName: 'DeepSeek',
+      model: 'deepseek-v4',
+      modelName: 'DeepSeek V4',
+      efforts: [
+        { id: 'off', name: 'Off' },
+        { id: 'high', name: 'High', description: 'Deep reasoning for hard tasks' },
+        { id: 'max', name: 'Max' },
+      ],
+      defaultEffort: 'high',
+    }
+    const rendered = stripAnsi(renderView({
+      rows: 24, columns: 100, state, input: '', cursor: 0,
+      overlay: { kind: 'models', items: [choice], index: 0, stage: 'effort', chosen: choice, effortIndex: 1 },
+      expandedTools: false, scroll: 0, notice: undefined,
+    }).text)
+    expect(rendered).toContain('Reasoning depth')
+    expect(rendered).toContain('DeepSeek / DeepSeek V4')
+    expect(rendered).toContain('High')
+    expect(rendered).toContain('(default)')
+    // Only the highlighted row explains itself.
+    expect(rendered).toContain('Deep reasoning for hard tasks')
+  })
+
+  it('marks routes that offer depths on the model stage', () => {
+    const state = initialTranscript()
+    const rendered = stripAnsi(renderView({
+      rows: 24, columns: 100, state, input: '', cursor: 0,
+      overlay: {
+        kind: 'models',
+        index: 0,
+        stage: 'model',
+        effortIndex: 0,
+        items: [
+          { provider: 'deepseek', providerName: 'DeepSeek', model: 'v4', modelName: 'V4', efforts: [{ id: 'off', name: 'Off' }] },
+          { provider: 'plain', providerName: 'Plain', model: 'chat', modelName: 'Chat', efforts: [] },
+        ],
+      },
+      expandedTools: false, scroll: 0, notice: undefined,
+    }).text)
+    expect(rendered).toContain('1 depths')
+    expect(rendered).toContain('Plain / Chat')
+  })
 })
 
 function stripAnsi(value: string): string {

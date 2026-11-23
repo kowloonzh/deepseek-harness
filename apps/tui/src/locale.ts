@@ -51,7 +51,9 @@ export const messages = {
   expandTools: 'Ctrl+O expand',
   showToolDetails: '+ Show details',
   chooseSession: '↑/↓ choose · Enter open · Esc close',
-  chooseModel: '↑/↓ choose · Enter apply · Esc close',
+  chooseModel: '↑/↓ choose · Enter next · Esc close',
+  chooseEffort: '↑/↓ choose reasoning depth · Enter apply · Esc back',
+  reasoningDepth: 'Reasoning depth',
   questionOptions: '↑/↓ move · Space toggle · Tab custom · Enter next · Esc cancel',
   questionCustom: 'Enter submit · Esc cancel',
   exitHint: 'Press Ctrl+C again to exit',
@@ -100,7 +102,8 @@ export const messages = {
 
 export const localized = {
   opened: (sessionId: string): string => `Opened ${sessionId}`,
-  selectedModel: (provider: string, model: string): string => `Model: ${provider}/${model}`,
+  selectedModel: (provider: string, model: string, effort?: string): string =>
+    `Model: ${provider}/${model}${effort === undefined ? '' : ` (reasoning: ${effort})`}`,
   imageAdded: (index: number, name: string): string => `Image #${String(index)} added: ${name}`,
   imageOnlyPrompt: (count: number): string => `[${String(count)} image${count === 1 ? '' : 's'}]`,
   imageCountLimit: (count: number): string => `A prompt can contain at most ${String(count)} images`,

@@ -31,12 +31,26 @@ export interface QuestionUiRequest {
   }
 }
 
-/** One selectable model and its provider. */
+/** One reasoning depth a model route accepts. */
+export interface ModelEffortChoice {
+  /** Effort identifier sent to the host. */
+  readonly id: string
+  /** Operator-facing label. */
+  readonly name: string
+  /** Optional explanation of when the effort suits a task. */
+  readonly description?: string
+}
+
+/** One selectable model and its provider, plus the reasoning depths it accepts. */
 export interface ModelChoice {
   readonly provider: string
   readonly providerName: string
   readonly model: string
   readonly modelName: string
+  /** Depths this route accepts; empty when the model has no reasoning control. */
+  readonly efforts: readonly ModelEffortChoice[]
+  /** Depth the host applies when the selection names none. */
+  readonly defaultEffort?: string
 }
 
 /** Session picker state. */
@@ -46,11 +60,24 @@ export interface SessionPicker {
   index: number
 }
 
-/** Model picker state. */
+/**
+ * Model picker state.
+ *
+ * The picker runs in two stages so a model and its reasoning depth are chosen
+ * together, mirroring how Codex offers the depth per model instead of as a
+ * separate setting: `stage` is `'model'` while choosing the route and
+ * `'effort'` while choosing its depth.
+ */
 export interface ModelPicker {
   readonly kind: 'models'
   readonly items: readonly ModelChoice[]
   index: number
+  /** Stage currently accepting input. */
+  stage: 'model' | 'effort'
+  /** Route picked in the model stage, once `stage` is `'effort'`. */
+  readonly chosen?: ModelChoice
+  /** Depth highlighted in the effort stage. */
+  effortIndex: number
 }
 
 /** Pending queue manager. */
@@ -106,12 +133,35 @@ export interface QuestionPrompt {
 /** Current modal interaction, if any. */
 export type Overlay = SessionPicker | ModelPicker | QueuePicker | ApprovalPrompt | QuestionPrompt
 
-/** Flatten a model catalog into picker rows. */
+/**
+ * Flatten a model catalog into picker rows, carrying each route's reasoning depths.
+ * @param catalog - host model catalog.
+ * @returns one row per model, in catalog order.
+ */
 export function modelChoices(catalog: ModelCatalog): readonly ModelChoice[] {
   return catalog.groups.flatMap(group => group.models.map(model => ({
     provider: group.id,
     providerName: group.name,
     model: model.id,
     modelName: model.name,
+    efforts: (model.reasoning?.efforts ?? []).map(effort => ({
+      id: effort.id,
+      name: effort.name,
+      ...(effort.description === undefined ? {} : { description: effort.description }),
+    })),
+    ...(model.reasoning?.defaultEffort === undefined ? {} : { defaultEffort: model.reasoning.defaultEffort }),
   })))
+}
+
+/**
+ * The effort index to highlight for one route.
+ * @param choice - route whose depths are offered.
+ * @param current - depth already selected for this Session, if any.
+ * @returns the index of the current default depth, else the host default, else the first.
+ */
+export function defaultEffortIndex(choice: ModelChoice, current?: string): number {
+  const wanted = current ?? choice.defaultEffort
+  if (wanted === undefined) return 0
+  const found = choice.efforts.findIndex(effort => effort.id === wanted)
+  return found < 0 ? 0 : found
 }

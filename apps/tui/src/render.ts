@@ -4,6 +4,7 @@ import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { marked, type Token, type Tokens } from 'marked'
 import type {
+  ModelChoice,
   Overlay,
   PendingSubmission,
   QuestionPrompt,
@@ -1280,6 +1281,9 @@ function modelOverlayLines(
   width: number,
   height: number,
 ): string[] {
+  if (overlay.stage === 'effort' && overlay.chosen !== undefined) {
+    return effortOverlayLines(overlay, overlay.chosen, width, height)
+  }
   const window = pickerWindow(overlay.items.length, overlay.index, Math.max(1, height - 5))
   return [
     `${BOLD}${messages.modelPicker}${RESET}`,
@@ -1287,10 +1291,44 @@ function modelOverlayLines(
     ...overlay.items.slice(window.start, window.end).map((item, offset) => {
       const index = window.start + offset
       const marker = index === overlay.index ? `${CYAN}>${RESET}` : ' '
-      return `${marker} ${fit(`${item.providerName} / ${item.modelName}`, width - 2)}`
+      const depth = item.efforts.length === 0 ? '' : ` ${DIM}·${RESET}${DIM}${String(item.efforts.length)} depths${RESET}`
+      return `${marker} ${fitAnsi(`${item.providerName} / ${item.modelName}${depth}`, width - 2)}`
     }),
     '',
     `${DIM}${messages.chooseModel}${RESET}`,
+  ]
+}
+
+/**
+ * Reasoning-depth stage of the model picker: the route being configured, then its depths.
+ * @param overlay - open picker in the effort stage.
+ * @param chosen - the route whose depths are listed.
+ * @param width - available columns.
+ * @param height - available rows.
+ * @returns overlay rows, top to bottom.
+ */
+function effortOverlayLines(
+  overlay: Extract<Overlay, { kind: 'models' }>,
+  chosen: ModelChoice,
+  width: number,
+  height: number,
+): string[] {
+  const window = pickerWindow(chosen.efforts.length, overlay.effortIndex, Math.max(1, height - 7))
+  const rows = chosen.efforts.slice(window.start, window.end).flatMap((effort, offset) => {
+    const index = window.start + offset
+    const marker = index === overlay.effortIndex ? `${CYAN}>${RESET}` : ' '
+    const isDefault = effort.id === chosen.defaultEffort ? ` ${DIM}(default)${RESET}` : ''
+    const label = `${marker} ${fitAnsi(`${effort.name}${isDefault}`, width - 2)}`
+    if (index !== overlay.effortIndex || effort.description === undefined) return [label]
+    return [label, `  ${DIM}${fitAnsi(effort.description, width - 4)}${RESET}`]
+  })
+  return [
+    `${BOLD}${messages.modelPicker}${RESET} ${DIM}${fitAnsi(`${chosen.providerName} / ${chosen.modelName}`, width - 16)}${RESET}`,
+    '',
+    `${BOLD}${messages.reasoningDepth}${RESET}`,
+    ...rows,
+    '',
+    `${DIM}${messages.chooseEffort}${RESET}`,
   ]
 }
 
