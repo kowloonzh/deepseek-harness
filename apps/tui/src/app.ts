@@ -568,7 +568,10 @@ export class TuiApp {
       } else if (key.shift) {
         this.insertText('\n')
       } else {
-        void this.submit(this.state.running ? 'steer' : 'queue')
+        // Enter always queues. A running turn keeps its own progress, and the queued row is
+        // what Esc promotes into that turn and Alt+Up recalls for editing, so nothing joins
+        // a turn the operator did not explicitly interrupt.
+        void this.submit('queue')
       }
       return
     }
