@@ -175,10 +175,10 @@ describe('terminal prompt lifecycle', () => {
       input.write('queued follow-up')
       input.write('\t')
       await expect.poll(frame).toContain('queued: queued follow-up')
-      // Escape promotes the newest queued message into the running turn.
+      // Escape hands the newest queued message to the running turn: the Host owns it, so its
+      // dock row is spent and the transcript carries it once the Host admits the step.
       input.write('\u001b')
       await expect.poll(frame).not.toContain('queued: queued follow-up')
-      expect(frame()).toContain('steer: queued follow-up')
       input.write('\u0015')
       input.write('queued follow-up')
       input.write('\t')

@@ -748,6 +748,9 @@ export class TuiApp {
     if (this.state.sessionId === undefined) return
     try {
       await this.remote.updateQueue(this.state.sessionId, item.id, { kind: 'steer' })
+      // The Host now owns this message for the running turn, so its queue row is spent;
+      // leaving it in the dock made a steered message look like it was still waiting.
+      this.state = { ...this.state, queue: this.state.queue.filter(candidate => candidate.id !== item.id) }
       this.closeOverlay()
       this.setNotice(messages.queueSteered)
       return
@@ -757,6 +760,9 @@ export class TuiApp {
         return
       }
     }
+    // The turn stopped accepting steering before the message could join it, so stop the
+    // turn instead: the operator pressed Escape to move on.
+    this.state = { ...this.state, queue: this.state.queue.filter(candidate => candidate.id !== item.id) }
     await this.interrupt()
   }
 
