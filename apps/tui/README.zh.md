@@ -72,17 +72,40 @@ git config rerere.enabled true
 git config pull.rebase true
 ```
 
-跟踪 upstream：`master` 用快进更新，再把 TUI 分支变基到它上面：
+用一个可移动的 tag 记录已同步的基线，下次同步就能列出本次改了什么：
 
 ```sh
-git checkout master && git pull --ff-only upstream master
-git checkout feat/dsh-tui-profile && git rebase master
-git push --force-with-lease origin feat/dsh-tui-profile
+git fetch upstream --tags
+git log --oneline my-last-sync..upstream/master        # commits since the last sync
+git diff --stat my-last-sync..upstream/master -- apps/tui  # empty means no TUI conflict
 ```
 
-改动越出 TUI 声明的文件范围时 `apps/tui/tests/fork-boundary.spec.ts` 会失败，
-从而保证该分支始终可变基。upstream 同步后先执行 `pnpm install` 再跑测试，
-因为 upstream 可能新增了 TUI 经 client 依赖图引入的 workspace 包。
+### 升级到新的 upstream tag
+
+每次 upstream 同步都必须按顺序走完这三步。漏掉任一步构建，TUI 集成测试就会
+针对新的 upstream 代码失败。
+
+```sh
+# 1. Take the new upstream code on master, then refresh dependencies and artifacts.
+git checkout master
+git pull --ff-only upstream master
+pnpm install                # upstream may add workspace packages the TUI imports
+pnpm run build:artifacts    # the integration tests run against built lib/ and dist/
+
+# 2. Rebase the TUI branch onto it.
+git checkout feat/dsh-tui-profile
+git rebase master
+
+# 3. Publish the rebased branch and move the baseline tag.
+git push --force-with-lease origin feat/dsh-tui-profile
+git tag -f -a my-last-sync dsh-v<new-version> -m "Last upstream sync: dsh-v<new-version>"
+```
+
+即使变基没有任何冲突，第 1 步也不能省：漏掉 `pnpm install` 会让测试报
+`Cannot find package '@deepseek-ai/<new-package>/remote'`；漏掉 `build:artifacts`
+时，包虽然存在但没有构建出的 `lib/`，报错相同。变基因冲突中断，说明改动越出了
+TUI 声明的文件范围——`apps/tui/tests/fork-boundary.spec.ts` 正是在这种情况下失败，
+从而保证该分支始终可变基。
 
 ## 功能范围
 

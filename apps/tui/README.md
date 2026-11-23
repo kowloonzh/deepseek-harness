@@ -82,18 +82,42 @@ git config rerere.enabled true
 git config pull.rebase true
 ```
 
-Follow upstream with a fast-forward `master` and rebase the TUI branch onto it:
+Track the synced baseline with a movable tag so the next sync can list what
+changed since the last one:
 
 ```sh
-git checkout master && git pull --ff-only upstream master
-git checkout feat/dsh-tui-profile && git rebase master
-git push --force-with-lease origin feat/dsh-tui-profile
+git fetch upstream --tags
+git log --oneline my-last-sync..upstream/master        # commits since the last sync
+git diff --stat my-last-sync..upstream/master -- apps/tui  # empty means no TUI conflict
 ```
 
-`apps/tui/tests/fork-boundary.spec.ts` fails when a change reaches outside the
-TUI's declared files, which keeps the branch rebasable. After an upstream sync,
-run `pnpm install` before the suite, because upstream may add workspace packages
-the TUI imports through the client graph.
+### Upgrading to a new upstream tag
+
+Every upstream sync needs all three steps in this order. Skipping either build
+step makes the TUI integration tests fail against the new upstream code.
+
+```sh
+# 1. Take the new upstream code on master, then refresh dependencies and artifacts.
+git checkout master
+git pull --ff-only upstream master
+pnpm install                # upstream may add workspace packages the TUI imports
+pnpm run build:artifacts    # the integration tests run against built lib/ and dist/
+
+# 2. Rebase the TUI branch onto it.
+git checkout feat/dsh-tui-profile
+git rebase master
+
+# 3. Publish the rebased branch and move the baseline tag.
+git push --force-with-lease origin feat/dsh-tui-profile
+git tag -f -a my-last-sync dsh-v<new-version> -m "Last upstream sync: dsh-v<new-version>"
+```
+
+Step 1 is required even when the rebase is clean: a missing `pnpm install` fails
+the suite with `Cannot find package '@deepseek-ai/<new-package>/remote'`, and a
+missing `build:artifacts` fails it with the same error for a package that exists
+but has no built `lib/`. A rebase that stops on a conflict means a change outside
+the TUI's declared files — `apps/tui/tests/fork-boundary.spec.ts` fails exactly
+then, which is what keeps this branch rebasable.
 
 ## Scope
 
