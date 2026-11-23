@@ -291,7 +291,11 @@ export class TuiApp {
   }
 
   private readonly onResize = (): void => {
-    this.requestRender()
+    // A resized terminal invalidates every row position, and the pane that resized the tty
+    // may not have reported the new size when the pending incremental frame was queued.
+    // Rebuilding the whole screen makes the paint independent of whether that frame ran
+    // against the previous dimensions.
+    this.requestRender(false)
   }
 
   private readonly onData = (data: Buffer): void => {
