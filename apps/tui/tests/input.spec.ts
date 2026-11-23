@@ -1,7 +1,8 @@
 /** Raw terminal input decoding. */
 
 import { describe, expect, it } from 'vitest'
-import { buildPromptContent, decodeTerminalInput, parseTuiArguments, slashName, slashRoute, terminalCommandName } from '../src/app.ts'
+import { buildPromptContent, closesSteering, decodeTerminalInput, parseTuiArguments, slashName, slashRoute, terminalCommandName } from '../src/app.ts'
+import { TuiError } from '../src/error.ts'
 import type { ClipboardImage } from '../src/clipboard.ts'
 
 describe('raw terminal input', () => {
@@ -146,5 +147,19 @@ describe('slash line routing with staged images', () => {
   it('refuses images for a command that does not accept them, keeping the draft', () => {
     expect(slashRoute('/compact', 1, catalog)).toBe('refuse')
     expect(slashRoute('/unknown', 1, catalog)).toBe('refuse')
+  })
+})
+
+describe('steer refusal', () => {
+  it('recognizes a turn that closed steering', () => {
+    expect(closesSteering(new TuiError('REMOTE_FAILED', 'x', undefined, 'session/steer-unavailable'))).toBe(true)
+  })
+
+  it('keeps every other failure reportable', () => {
+    // A missing queued row and a transport failure are real problems, not a closed turn.
+    expect(closesSteering(new TuiError('REMOTE_FAILED', 'x', undefined, 'session/queue-item-not-found'))).toBe(false)
+    expect(closesSteering(new TuiError('REMOTE_FAILED', 'boom'))).toBe(false)
+    expect(closesSteering(new Error('boom'))).toBe(false)
+    expect(closesSteering(undefined)).toBe(false)
   })
 })
