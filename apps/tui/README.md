@@ -51,6 +51,50 @@ and `Starting session...`) and only then the first full frame with
 `Type a message or /help`. A launcher can treat that placeholder as stable proof
 that input is accepted.
 
+### Shell lines
+
+A draft that starts with `!` runs in the frontend's own process, in the frontend's
+working directory, and prints its captured output to the transcript:
+
+```text
+!pwd
+!git log --oneline -5
+```
+
+The line never reaches the host command executor or the model, so the output is
+transcript text a person reads rather than prompt content a model acts on. The
+shell comes from `$SHELL` (or `/bin/sh`, `cmd.exe` on Windows). Output is capped at
+256 KB per stream and the command is stopped after 120 seconds; truncation, a
+timeout, a signal, and a non-zero exit are each named in the result block. A `!`
+line cannot carry composer images, and `!` alone or `!=`/`!==` stays an ordinary
+draft.
+
+## Working in a fork
+
+This branch lives in a fork of `deepseek-ai/deepseek-harness`. Name the fork
+`origin` and the official repository `upstream`, then keep the TUI work on its own
+branch rather than on `master`:
+
+```sh
+git remote add origin   git@github.com:<you>/deepseek-harness.git
+git remote add upstream git@github.com:deepseek-ai/deepseek-harness.git
+git config rerere.enabled true
+git config pull.rebase true
+```
+
+Follow upstream with a fast-forward `master` and rebase the TUI branch onto it:
+
+```sh
+git checkout master && git pull --ff-only upstream master
+git checkout feat/dsh-tui-profile && git rebase master
+git push --force-with-lease origin feat/dsh-tui-profile
+```
+
+`apps/tui/tests/fork-boundary.spec.ts` fails when a change reaches outside the
+TUI's declared files, which keeps the branch rebasable. After an upstream sync,
+run `pnpm install` before the suite, because upstream may add workspace packages
+the TUI imports through the client graph.
+
 ## Scope
 
 The first version implements:

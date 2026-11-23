@@ -24,7 +24,7 @@ host 管理。
 dsh tui
 dsh tui --resume
 dsh tui --resume <session-id>
-dsh tui --prompt '<任务文本>'
+dsh tui --prompt '<task text>'
 DSH_URL='http://127.0.0.1:3080/?token=...' dsh tui
 ```
 
@@ -44,6 +44,45 @@ DSH_URL='http://127.0.0.1:3080/?token=...' dsh tui
 Session 建立前 TUI 先画一帧启动画面（`DeepSeek Harness` 和
 `Starting session...`），之后才画带 `Type a message or /help` 的首个完整画面。
 启动器可以把该占位符当作“输入已被接受”的稳定依据。
+
+### Shell 命令行
+
+以 `!` 开头的输入会在前端自身进程中、于前端工作目录下执行，并把捕获的输出打印到 transcript：
+
+```text
+!pwd
+!git log --oneline -5
+```
+
+该行不会进入 host 的命令执行器，也不会进入模型，因此输出是人阅读的 transcript 文本，
+而不是模型会据以行动的提示词内容。shell 取自 `$SHELL`（Windows 回退 `cmd.exe`，
+其余回退 `/bin/sh`）。每个流最多捕获 256 KB，命令超过 120 秒会被终止；截断、超时、
+被信号终止和非零退出码都会在结果块中写明。`!` 行不能携带输入框图片，单独的 `!`
+以及 `!=`、`!==` 仍按普通输入处理。
+
+## 在 fork 中工作
+
+本分支位于 `deepseek-ai/deepseek-harness` 的 fork 中。把 fork 命名为 `origin`，
+官方仓库命名为 `upstream`，并把 TUI 工作放在独立分支而不是 `master` 上：
+
+```sh
+git remote add origin   git@github.com:<you>/deepseek-harness.git
+git remote add upstream git@github.com:deepseek-ai/deepseek-harness.git
+git config rerere.enabled true
+git config pull.rebase true
+```
+
+跟踪 upstream：`master` 用快进更新，再把 TUI 分支变基到它上面：
+
+```sh
+git checkout master && git pull --ff-only upstream master
+git checkout feat/dsh-tui-profile && git rebase master
+git push --force-with-lease origin feat/dsh-tui-profile
+```
+
+改动越出 TUI 声明的文件范围时 `apps/tui/tests/fork-boundary.spec.ts` 会失败，
+从而保证该分支始终可变基。upstream 同步后先执行 `pnpm install` 再跑测试，
+因为 upstream 可能新增了 TUI 经 client 依赖图引入的 workspace 包。
 
 ## 功能范围
 

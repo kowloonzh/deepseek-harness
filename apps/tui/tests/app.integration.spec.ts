@@ -8,6 +8,28 @@ import { TuiApp } from '../src/app.ts'
 import { normalizeEntryUrl } from '../src/host.ts'
 import { TuiRemoteClient } from '../src/remote.ts'
 
+/**
+ * Text the composer currently holds for `app`, or '' when it is not painted yet.
+ * @param app - running terminal app, or undefined before it is created.
+ * @returns the composer row's content after its prompt marker.
+ */
+/**
+ * The draft text alone: the composer row's content without its right border and padding.
+ * @param app - running terminal app, or undefined before it is created.
+ * @returns the trimmed draft the composer shows.
+ */
+function draftText(app: TuiApp | undefined): string {
+  return composerDraft(app).replace(/\s*│\s*$/u, '').trimEnd()
+}
+
+function composerDraft(app: TuiApp | undefined): string {
+  // Only the composer is drawn as a boxed row, so the left border selects it;
+  // the suggestion list also contains '❯ ' and would match a looser search.
+  const row = (app?.screenLines() ?? []).find(line => line.trimStart().startsWith('│ ❯ '))
+  if (row === undefined) return ''
+  return row.slice(row.indexOf('❯ ') + 2)
+}
+
 describe('terminal prompt lifecycle', () => {
   it('shows the default model, streams a reply, and stays idle when acceptance arrives after completion', async () => {
     const host = await launchWebScaffold({
@@ -67,8 +89,11 @@ describe('terminal prompt lifecycle', () => {
       expect(text).not.toContain('model: default')
       expect(text).not.toContain('kill/yank')
       // The composer only appears once a frame has been painted, so wait for the
-      // box edges before snapshotting instead of reading one unretried frame.
+      // box edges and for the accepted prompt to leave the draft before snapshotting.
+      // Clearing the draft is a repaint the host acknowledgement schedules, so reading
+      // the box as soon as it exists catches the pre-clear frame under load.
       await expect.poll(() => (app?.screenLines() ?? []).join('\n')).toContain('╰')
+      await expect.poll(() => draftText(app)).toBe('')
       const finalRows = (app?.screenLines() ?? []).join('\n')
         .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').split('\n')
       const top = finalRows.findIndex(row => row.startsWith('╭'))
@@ -201,14 +226,6 @@ describe('terminal prompt lifecycle', () => {
     })
     const frame = (): string => (app?.screenLines() ?? []).join('\n')
       .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
-    /** Text the composer currently holds, or '' when no composer row is painted. */
-    const composerDraft = (): string => {
-      // Only the composer is drawn as a boxed row, so the left border selects it;
-      // the suggestion list also contains '❯ ' and would match a looser search.
-      const row = (app?.screenLines() ?? []).find(line => line.trimStart().startsWith('│ ❯ '))
-      if (row === undefined) return ''
-      return row.slice(row.indexOf('❯ ') + 2)
-    }
     try {
       await expect.poll(() => text).toContain('deepseek-v4-flash')
       input.write('/new')
@@ -225,7 +242,7 @@ describe('terminal prompt lifecycle', () => {
       input.write('\t')
       // Assert the composer row itself: the suggestion list also contains "/icai",
       // so a whole-frame containment check passes even when Tab completes nothing.
-      await expect.poll(() => composerDraft().trimStart().replace(/\s*│$/u, '').trimEnd()).toBe('/icai')
+      await expect.poll(() => draftText(app)).toBe('/icai')
       input.write('\u0003')
     } finally {
       input.write('\u0003/quit\r')
