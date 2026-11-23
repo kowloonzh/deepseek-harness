@@ -1167,6 +1167,8 @@ export class TuiApp {
       `${messages.statusLabels.context}: ${this.contextSummary()}`,
       `${messages.statusLabels.permission}: ${this.state.permission ?? '(unknown)'}`,
       `${messages.statusLabels.state}: ${this.state.running ? 'running' : 'idle'}`,
+      // The frame is laid out against these two numbers, so a layout report can quote them.
+      `${messages.statusLabels.terminal}: ${String(this.stdout.columns)}x${String(this.stdout.rows)}`,
     ].join('\n'))
   }
 

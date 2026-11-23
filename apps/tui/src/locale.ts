@@ -97,6 +97,7 @@ export const messages = {
     tools: 'Tools',
     messages: 'Messages',
     state: 'State',
+    terminal: 'Terminal',
   },
 } as const
 
