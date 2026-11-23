@@ -1213,9 +1213,9 @@ function statusLine(
   const activeTool = state.items.findLast(item => item.kind === 'tool' && item.toolStatus === 'running')
   const activity = activeTool === undefined ? '' : ` | ${activeTool.title ?? messages.tool} running`
   const bottom = scroll > 0 ? ' | ↓ bottom · Esc' : ''
-  // A running turn is the one state worth a permanent marker; the idle flag only restated
-  // that nothing was happening, so it left the line for `/status`.
-  const runState = state.running ? ` | ${messages.running}` : ''
+  // The run state is one paired reading: showing only the running half made an idle
+  // terminal look like a frame that had failed to paint its tail.
+  const runState = ` | ${state.running ? messages.running : messages.idle}`
   const base = `${cwd} | ${model}${context}${cacheReading}${activity}${runState}${bottom}`
   if (bottom !== '' && (notice === undefined || notice === '')) {
     const tail = `${activity}${bottom}`
