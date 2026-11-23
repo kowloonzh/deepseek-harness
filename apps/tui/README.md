@@ -119,6 +119,37 @@ but has no built `lib/`. A rebase that stops on a conflict means a change outsid
 the TUI's declared files — `apps/tui/tests/fork-boundary.spec.ts` fails exactly
 then, which is what keeps this branch rebasable.
 
+### Running local TUI changes
+
+`dsh tui` executes the bundled `apps/tui/lib/index.js`, never `src/`. A source
+edit therefore has no visible effect until the bundle is rebuilt:
+
+```sh
+pnpm --filter @deepseek-ai/dsh-tui-app run bundle
+```
+
+The tests read `src/` through tsconfig paths and pass without this step, so a
+green suite does not mean a running terminal picked the change up.
+
+### Registering `dsh` for a Node version
+
+A globally linked `dsh` belongs to one Node version directory. After installing
+another Node with `nvm`, that version has no `dsh` until the same link is added,
+and a shell that silently keeps the older `dsh` runs the older bundle:
+
+```sh
+N="$HOME/.nvm/versions/node/<version>"
+mkdir -p "$N/lib/node_modules/@deepseek-ai"
+ln -sfn <repo>/apps/cli "$N/lib/node_modules/@deepseek-ai/dsh"
+ln -sfn ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js "$N/bin/dsh"
+```
+
+Confirm the resolved entrypoint before trusting a local build:
+
+```sh
+node -v; command -v dsh; readlink -f "$(command -v dsh)"
+```
+
 ## Scope
 
 The first version implements:

@@ -107,6 +107,36 @@ git tag -f -a my-last-sync dsh-v<new-version> -m "Last upstream sync: dsh-v<new-
 TUI 声明的文件范围——`apps/tui/tests/fork-boundary.spec.ts` 正是在这种情况下失败，
 从而保证该分支始终可变基。
 
+### 让本地改动生效
+
+`dsh tui` 执行的是打包产物 `apps/tui/lib/index.js`，从不读取 `src/`。因此修改源码后，
+在重新打包之前界面不会有任何变化：
+
+```sh
+pnpm --filter @deepseek-ai/dsh-tui-app run bundle
+```
+
+测试通过 tsconfig paths 直接读 `src/`，不需要这一步，所以测试全绿并不代表运行中的终端
+已经用上了改动。
+
+### 为某个 Node 版本注册 `dsh`
+
+全局链接的 `dsh` 只属于一个 Node 版本目录。用 `nvm` 装了新版本后，该版本下没有 `dsh`，
+需要补上同样的链接；否则 shell 会静默沿用旧版本的 `dsh`，运行的也是旧产物：
+
+```sh
+N="$HOME/.nvm/versions/node/<version>"
+mkdir -p "$N/lib/node_modules/@deepseek-ai"
+ln -sfn <repo>/apps/cli "$N/lib/node_modules/@deepseek-ai/dsh"
+ln -sfn ../lib/node_modules/@deepseek-ai/dsh/lib/bin.js "$N/bin/dsh"
+```
+
+在信任本地构建之前，先确认实际解析到的入口：
+
+```sh
+node -v; command -v dsh; readlink -f "$(command -v dsh)"
+```
+
 ## 功能范围
 
 首版实现：
