@@ -19,6 +19,9 @@ import type {
 } from './transcript.ts'
 
 const ESC = '\u001b['
+/** Stop the terminal wrapping a row that fills its last column, and restore it after. */
+const AUTOWRAP_OFF = '\u001b[?7l'
+const AUTOWRAP_ON = '\u001b[?7h'
 const RESET = `${ESC}0m`
 const BOLD = `${ESC}1m`
 const DIM = `${ESC}2m`
@@ -173,9 +176,13 @@ export class TerminalRenderer {
       lines: frame.lines,
     }
     dumpRenderTrace(options, incremental, changed === undefined, frame.lines, changed?.length ?? 0)
+    const body = changed ?? fullRepaint(frame.lines)
+    // Autowrap is off for the paint: a row that measures one cell wider than the terminal
+    // would otherwise wrap at the last column, push every following row down by one, and
+    // leave the framebuffer disagreeing with `screenCache` about which row holds what.
     return {
       ...frame,
-      text: changed ?? `${ESC}2J${ESC}H${frame.lines.join('\n')}`,
+      text: `${AUTOWRAP_OFF}${body}${AUTOWRAP_ON}`,
     }
   }
 
@@ -373,6 +380,25 @@ function sliceCells(text: string, startColumn: number, endColumn: number): strin
   }
   return result
 }
+
+/**
+ * Paint every row at its own position after clearing the screen.
+ *
+ * Addressing each row instead of separating them with a newline keeps the paint independent
+ * of how the terminal expands LF, so a row can never consume two rows or leave the cursor
+ * mid-line.
+ * @param lines - rows to paint, already fitted to the terminal width.
+ * @returns the escape sequence that places all rows.
+ */
+function fullRepaint(lines: readonly string[]): string {
+  // Rows stay newline-separated because `screenLines`, the transcript snapshot tests, and the
+  // terminal itself all read the frame as newline-delimited rows. `\r` before each break puts
+  // the cursor at column 1 independently of how the terminal expands LF, and autowrap is off
+  // for the paint, so a full-width row cannot consume two rows.
+  return `${ESC}2J${ESC}H${lines.join('\r\n')}`
+}
+
+
 
 function changedRows(
   previous: ScreenRenderCache | undefined,

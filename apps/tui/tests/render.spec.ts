@@ -531,8 +531,9 @@ describe('terminal rendering', () => {
 })
 
 function stripAnsi(value: string): string {
-  return value.replaceAll(
-    /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu,
-    '',
-  )
+  return value
+    .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu, '')
+    // Frames break rows with CRLF so the cursor returns to column 1 regardless of how the
+    // terminal expands LF; the visible text keeps only the newline.
+    .replaceAll('\r\n', '\n')
 }
