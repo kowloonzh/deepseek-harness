@@ -405,6 +405,39 @@ describe('terminal rendering', () => {
     expect(rendered).toContain('1 depths')
     expect(rendered).toContain('Plain / Chat')
   })
+
+  it('strips OSC hyperlink parameters from untrusted header text', () => {
+    // A model-authored title carrying an OSC 8 link must not leave `]8;;...` visible:
+    // those bytes are measured as cells and paint rows over the composer.
+    const state = initialTranscript()
+    state.title = 'ok\u001b]8;;https://evil.test\u001b\\CLICK\u001b]8;;\u001b\\'
+    state.items = [{ id: 'a', kind: 'assistant', text: 'hi' }]
+    const rendered = renderView({
+      rows: 20, columns: 60, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+    }).text
+    expect(rendered).not.toContain('\u001b]8;;https')
+    expect(stripAnsi(rendered)).not.toContain('8;;')
+    expect(stripAnsi(rendered)).toContain('CLICK')
+    // The header row still fits the terminal exactly.
+    const header = stripAnsi(rendered).split('\n')[0] ?? ''
+    expect(header.length).toBeLessThanOrEqual(60)
+  })
+
+  it('keeps transcript hyperlinks intact while dropping their visible parameters', () => {
+    const state = initialTranscript()
+    state.items = [{ id: 'a', kind: 'assistant', text: 'see [YG-4021](https://jira.test/browse/YG-4021)' }]
+    const raw = renderView({
+      rows: 20, columns: 60, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+    }).text
+    const visible = stripAnsi(raw)
+    expect(visible).toContain('YG-4021')
+    expect(visible).not.toContain('8;;')
+    expect(visible).not.toContain('jira.test')
+    // The transcript still emits the clickable target.
+    expect(raw).toContain('\u001b]8;;https://jira.test/browse/YG-4021\u001b\\')
+  })
 })
 
 function stripAnsi(value: string): string {

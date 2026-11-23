@@ -1405,8 +1405,21 @@ export function wrapText(text: string, width: number): string[] {
   return lines
 }
 
+const ANSI_SEQUENCE_GLOBAL = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu
+/**
+ * Remove every control sequence from untrusted text before it is measured or painted.
+ *
+ * Model-authored text reaches the header, the composer, and the status line. Both CSI
+ * and OSC must go: an OSC 8 hyperlink left behind would render its parameters
+ * (`]8;;https://...`) as visible cells and skew every width calculation that follows,
+ * which paints rows over the composer.
+ * @param text - text from a model, a host, or a shell result.
+ * @returns the text with escape sequences and other control characters removed.
+ */
 function sanitize(text: string): string {
-  return text.replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '').replaceAll(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
+  return text
+    .replaceAll(ANSI_SEQUENCE_GLOBAL, '')
+    .replaceAll(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
 }
 
 function boxContent(marker: string, content: string, width: number): string {
@@ -1495,7 +1508,6 @@ export function stripAnsi(text: string): string {
   return text.replaceAll(ANSI_SEQUENCE_GLOBAL, '')
 }
 
-const ANSI_SEQUENCE_GLOBAL = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\](?:[^\u0007\u001b]|\u001b(?!\\))*(?:\u0007|\u001b\\)/gu
 
 function compact(value: number): string {
   if (value < 1_000) return String(value)
