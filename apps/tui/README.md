@@ -185,7 +185,7 @@ The mouse wheel scrolls the conversation transcript. Up/Down remain prompt histo
 
 User messages render as a full-width shaded block while assistant text stays on the normal background. No visible role markers are added, so terminal-native selection copies only the message text.
 
-Enter always queues the message, so nothing joins a running turn on its own: the queued row is delivered when that turn ends. While a turn runs, Esc sends the newest queued message into the turn instead, falling back to interrupting the turn once it no longer accepts one, and Alt+Up recalls that row into the composer for editing. Ctrl+Enter interrupts before submitting. `/queue` provides steer, edit, and remove actions for pending messages. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
+Enter always queues the message, so nothing joins a running turn on its own: the queued row is delivered when that turn ends. Ctrl+Enter interrupts the running turn and sends the message at once, and Alt+Up recalls the newest queued row into the composer for editing. Esc only stops things: it closes the open overlay, and otherwise interrupts the running turn. Tab completes the slash menu or the draft instead of queueing. `/queue` provides edit and remove actions for pending messages. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
 
 ## Herdr
 

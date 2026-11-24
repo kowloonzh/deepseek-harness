@@ -172,7 +172,7 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 
 用户消息使用整行底色块，助手正文保持普通背景。界面不渲染可见角色标记，终端原生选择复制时只包含消息正文。
 
-Enter 始终把消息放进队列，不会有消息自行插入正在运行的回合：该回合结束后队列中的消息才会投递。运行中按 Esc 改为把最新的排队消息插入当前回合，回合不再接受插队时回退为中断该回合；按 Alt+Up 把该条消息召回到输入框修改。Ctrl+Enter 会先中断再提交。`/queue` 支持对待处理消息执行 steer、编辑和删除。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
+Enter 始终把消息放进队列，不会有消息自行插入正在运行的回合：该回合结束后队列中的消息才会投递。Ctrl+Enter 会中断正在运行的回合并立即发出这条消息；按 Alt+Up 把最新的排队消息召回到输入框修改。Esc 只负责停止：有浮层时关闭浮层，否则中断正在运行的回合。Tab 用于补全斜杠菜单或草稿，不再承担排队。`/queue` 支持对待处理消息执行编辑和删除。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
 
 ## Herdr
 

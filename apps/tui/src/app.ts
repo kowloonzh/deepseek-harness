@@ -373,17 +373,8 @@ export class TuiApp {
         this.requestRender()
         return
       }
-      // A queued message is waiting for this turn to end; Escape promotes the
-      // newest one into the running turn instead of discarding it. When the turn no
-      // longer accepts steering, the same key falls back to interrupting it, because
-      // an operator pressing Escape expects the running turn to stop.
-      const queued = this.state.running
-        ? [...this.state.queue].reverse().find(candidate => candidate.editable)
-        : undefined
-      if (queued !== undefined) {
-        void this.steerOrInterrupt(queued)
-        return
-      }
+      // Escape only stops things: it clears the notice, and it interrupts a running
+      // turn. Sending is Enter's job, and interrupting *and* sending is Ctrl+Enter's.
       if (this.state.running) void this.interrupt()
       else this.setNotice(undefined)
       this.requestRender()
@@ -558,10 +549,6 @@ export class TuiApp {
       return
     }
     if (key.name === 'tab') {
-      if (this.state.running && this.input.trim() !== '') {
-        void this.submit('queue')
-        return
-      }
       this.completeInput()
       return
     }
@@ -648,10 +635,7 @@ export class TuiApp {
     if (overlay.kind === 'queue') {
       if (key.name === 'up') overlay.index = Math.max(0, overlay.index - 1)
       else if (key.name === 'down') overlay.index = Math.min(overlay.items.length - 1, overlay.index + 1)
-      else if (key.name === 'return' || key.name === 'enter') {
-        const selected = overlay.items[overlay.index]
-        if (selected !== undefined) void this.steerQueueItem(selected)
-      } else if (key.name === 'escape') this.closeOverlay()
+      else if (key.name === 'escape') this.closeOverlay()
       else if (sequence === 'e') {
         const selected = overlay.items[overlay.index]
         if (selected !== undefined) this.beginQueueEdit(selected)
@@ -722,48 +706,6 @@ export class TuiApp {
     } catch (error) {
       this.addError(error)
     }
-  }
-
-  private async steerQueueItem(item: QueuePrompt): Promise<void> {
-    if (this.state.sessionId === undefined) return
-    try {
-      await this.remote.updateQueue(this.state.sessionId, item.id, { kind: 'steer' })
-      this.closeOverlay()
-      this.setNotice(messages.queueSteered)
-    } catch (error) {
-      this.addError(error)
-    }
-  }
-
-  /**
-   * Steer one queued message into the running turn, interrupting that turn when the host
-   * has already closed steering.
-   *
-   * `session/steer-unavailable` means the Agent stopped before the message could join the
-   * turn; the Web composer treats that as a silent convergence, but Escape is an operator
-   * asking for the turn to stop, so the same key interrupts instead of surfacing a failure.
-   * @param item - the queued message Escape would have steered.
-   */
-  private async steerOrInterrupt(item: QueuePrompt): Promise<void> {
-    if (this.state.sessionId === undefined) return
-    try {
-      await this.remote.updateQueue(this.state.sessionId, item.id, { kind: 'steer' })
-      // The Host now owns this message for the running turn, so its queue row is spent;
-      // leaving it in the dock made a steered message look like it was still waiting.
-      this.state = { ...this.state, queue: this.state.queue.filter(candidate => candidate.id !== item.id) }
-      this.closeOverlay()
-      this.setNotice(messages.queueSteered)
-      return
-    } catch (error) {
-      if (!closesSteering(error)) {
-        this.addError(error)
-        return
-      }
-    }
-    // The turn stopped accepting steering before the message could join it, so stop the
-    // turn instead: the operator pressed Escape to move on.
-    this.state = { ...this.state, queue: this.state.queue.filter(candidate => candidate.id !== item.id) }
-    await this.interrupt()
   }
 
   private async removeQueueItem(item: QueuePrompt): Promise<void> {
@@ -1836,19 +1778,6 @@ export function commitQuestionAnswer(prompt: QuestionPrompt): boolean {
 export function terminalCommandName(line: string): (typeof LOCAL_COMMANDS)[number] | undefined {
   const name = slashName(line)
   return LOCAL_COMMANDS.find(command => command === name) ?? LOCAL_COMMAND_ALIASES[name]
-}
-
-/**
- * Whether a failed steer failed only because the turn stopped accepting one.
- *
- * The host answers `session/steer-unavailable` once the Agent is stopping, which the Web
- * composer treats as a silent convergence. The terminal needs the distinction because the
- * same refusal is the signal to interrupt instead of reporting a failure.
- * @param error - rejection from a steer attempt.
- * @returns true when the turn closed steering rather than the steer failing.
- */
-export function closesSteering(error: unknown): boolean {
-  return error instanceof TuiError && error.remoteCode === 'session/steer-unavailable'
 }
 
 /** Where one slash line goes once the terminal's own commands decline it. */

@@ -164,25 +164,20 @@ describe('terminal prompt lifecycle', () => {
       await expect.poll(() => text).toContain('deepseek-v4-flash')
       input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
       await expect.poll(frame).toContain('| running')
-      input.write('queued follow-up')
-      input.write('\t')
+      // Enter is the only way to queue: Tab completes instead.
+      input.write('queued follow-up\r')
       await expect.poll(frame).toContain('queued: queued follow-up')
       // Alt+Up recalls the newest queued message into the editor instead.
       input.write('\u001b[1;3A')
       await expect.poll(frame).not.toContain('queued: queued follow-up')
       expect(frame()).toContain('queued follow-up')
       input.write('\u0015')
-      input.write('queued follow-up')
-      input.write('\t')
+      input.write('queued follow-up\r')
       await expect.poll(frame).toContain('queued: queued follow-up')
-      // Escape hands the newest queued message to the running turn: the Host owns it, so its
-      // dock row is spent and the transcript carries it once the Host admits the step.
+      // Escape only stops the turn; the queued message keeps waiting for its own turn.
       input.write('\u001b')
-      await expect.poll(frame).not.toContain('queued: queued follow-up')
-      input.write('\u0015')
-      input.write('queued follow-up')
-      input.write('\t')
-      await expect.poll(frame).toContain('queued: queued follow-up')
+      await expect.poll(frame).not.toContain('| running')
+      expect(frame()).toContain('queued: queued follow-up')
       input.write('/queue\r')
       await expect.poll(frame).toContain('Pending messages')
       input.write('d')
