@@ -1,6 +1,6 @@
 /** Minimal alternate-screen terminal application over the public DSH Client Remote API. */
 
-import { readdirSync, statSync } from 'node:fs'
+import { appendFileSync, readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type {
   ModelCatalog,
@@ -320,6 +320,13 @@ export class TuiApp {
   }
 
   private readonly onData = (data: Buffer): void => {
+    // `DSH_TUI_DEBUG_INPUT` records the bytes each keypress delivers, which is how a terminal
+    // that never reports a key (Alt+Enter on some layouts) is told apart from a binding that
+    // ignores it.
+    const tracePath = process.env.DSH_TUI_DEBUG_INPUT
+    if (tracePath !== undefined && tracePath !== '') {
+      appendFileSync(tracePath, `${JSON.stringify(data.toString())}\n`)
+    }
     const text = this.pendingEscape + data.toString()
     this.pendingEscape = ''
     // A terminal sends Alt+Enter as Escape followed by carriage return, and the two can
