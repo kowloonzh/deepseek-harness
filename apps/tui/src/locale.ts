@@ -23,7 +23,7 @@ export const messages = {
     '!<command>        run a shell command here (not sent to the model)',
     '',
     'Enter             queue the message; a running turn receives it when it ends',
-    'Ctrl+Enter        interrupt the running turn and send this message now',
+    'Ctrl+Enter        interrupt the running turn and send this message now (Ctrl+X too)',
     'Esc               interrupt the running turn, or close the open overlay',
     'Alt+Up            recall the newest queued message for editing',
   ].join('\n'),

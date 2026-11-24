@@ -148,3 +148,13 @@ describe('slash line routing with staged images', () => {
     expect(slashRoute('/unknown', 1, catalog)).toBe('refuse')
   })
 })
+
+describe('interrupt-and-send keys', () => {
+  it('delivers Ctrl+Enter as an enhanced sequence and Ctrl+X as one control byte', () => {
+    // Terminals that report a modified Enter use the Kitty protocol form; Ctrl+X arrives as
+    // 0x18 everywhere, including keyboards whose right-hand Ctrl never reports a modified
+    // Enter at all.
+    expect(decodeTerminalInput('\u001b[13;5u')[0]).toMatchObject({ name: 'return', ctrl: true })
+    expect(decodeTerminalInput('\u0018')[0]).toMatchObject({ name: 'x', ctrl: true })
+  })
+})
