@@ -147,6 +147,10 @@ describe('terminal rendering', () => {
     // The permission mode moved to `/status`; cache share took its place on the row.
     expect(status).not.toContain('workspace-write')
     expect(status).toContain('cache 20%')
+    // The dock explains the queued rows only. A draft-level shortcut listed here would read
+    // as an action on a queued row, which Alt+Enter cannot perform.
+    expect(frame.text).toContain('Alt+Up recall')
+    expect(frame.text).not.toContain('Alt+Enter')
   })
 
   it('groups consecutive tool calls and expands individual details with Ctrl+O', () => {

@@ -128,7 +128,7 @@ describe('terminal prompt lifecycle', () => {
     }
   }, 60_000)
 
-  it('queues with Tab while running and manages the dock through /queue', async () => {
+  it('steers with Enter and manages the dock through /queue', async () => {
     const host = await launchWebScaffold({
       replayFixture: resolve(import.meta.dirname, '../../../snapshots/web/live-interactions/session.v3.jsonl'),
       compareReplaySession: false,
@@ -164,24 +164,23 @@ describe('terminal prompt lifecycle', () => {
       await expect.poll(() => text).toContain('deepseek-v4-flash')
       input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
       await expect.poll(frame).toContain('| running')
-      // Enter is the only way to queue: Tab completes instead.
+      // Enter hands the message to the running turn, which restates it as steering.
       input.write('queued follow-up\r')
-      await expect.poll(frame).toContain('queued: queued follow-up')
-      // Alt+Up recalls the newest queued message into the editor instead.
+      await expect.poll(frame).toContain('steer: queued follow-up')
+      // Alt+Up recalls that message into the editor instead.
       input.write('\u001b[1;3A')
-      await expect.poll(frame).not.toContain('queued: queued follow-up')
+      await expect.poll(frame).not.toContain('steer: queued follow-up')
       expect(frame()).toContain('queued follow-up')
       input.write('\u0015')
       input.write('queued follow-up\r')
-      await expect.poll(frame).toContain('queued: queued follow-up')
-      // Escape only stops the turn; the queued message keeps waiting for its own turn.
+      await expect.poll(frame).toContain('steer: queued follow-up')
+      // Escape only stops the turn.
       input.write('\u001b')
       await expect.poll(frame).not.toContain('| running')
-      expect(frame()).toContain('queued: queued follow-up')
       input.write('/queue\r')
       await expect.poll(frame).toContain('Pending messages')
       input.write('d')
-      await expect.poll(frame).not.toContain('queued: queued follow-up')
+      await expect.poll(frame).not.toContain('queued follow-up')
       await remote.cancel(sessionId).catch(() => {})
       await settled
     } finally {

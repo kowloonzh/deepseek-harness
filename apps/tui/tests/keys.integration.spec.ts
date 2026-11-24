@@ -19,8 +19,6 @@ const KEY = {
   /** Plain Enter is carriage return. */
   enter: '\r',
   tab: '\t',
-  /** Alt+Enter is Escape-prefixed CR in the legacy encoding. */
-  altEnter: '\u001b\r',
   escape: '\u001b',
   /** Ctrl+Enter over the Kitty keyboard protocol. */
   ctrlEnter: '\u001b[13;5u',
@@ -107,7 +105,7 @@ async function expectSentDraftBreaksOut(key: string): Promise<void> {
 }
 
 describe('composer keys', () => {
-  it('queues on Enter, interrupts and sends on Alt+Enter, and only interrupts on Escape', async () => {
+  it('queues on Enter and only interrupts on Escape', async () => {
     const terminal = await mountTerminal()
     try {
       await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
@@ -124,32 +122,6 @@ describe('composer keys', () => {
       terminal.input.write(KEY.escape)
       await expect.poll(() => terminal.screen()).not.toContain('| running')
 
-      // Alt+Enter sends the draft at once instead of queueing it. The turn above was already
-      // interrupted, which is why this is the plain send half of the gesture.
-      terminal.input.write('alt enter sent this')
-      terminal.input.write(KEY.altEnter)
-      await expect.poll(() => terminal.screen()).not.toContain('queued: alt enter sent this')
-      await expect.poll(() => terminal.screen()).toContain('alt enter sent this')
-    } finally {
-      await terminal.stop()
-    }
-  }, 60_000)
-
-  it('still interrupts and sends when Escape and Enter arrive split', async () => {
-    // A terminal can deliver Alt+Enter as two reads: the escape prefix, then carriage return.
-    // Without holding the prefix these decode as Escape (interrupt) plus Enter (queue), which
-    // made the gesture look inert.
-    const terminal = await mountTerminal()
-    try {
-      await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
-      terminal.input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
-      await expect.poll(() => terminal.screen()).toContain('| running')
-      terminal.input.write('split alt enter')
-      terminal.input.write('\u001b')
-      await new Promise(resolve => setTimeout(resolve, 5))
-      terminal.input.write('\r')
-      await expect.poll(() => terminal.screen()).not.toContain('queued: split alt enter')
-      await expect.poll(() => terminal.screen()).toContain('split alt enter')
     } finally {
       await terminal.stop()
     }

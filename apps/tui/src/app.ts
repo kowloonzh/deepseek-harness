@@ -80,13 +80,7 @@ const DEFAULT_IMAGE_LIMITS = {
   maxMessageImageBytes: 200 * 1024 * 1024,
 } as const
 /** Grace after `stop` for `dispose` to finish before the process exits anyway. */
-/**
- * Inbox target every terminal submission uses.
- *
- * The terminal only queues: a message waits for the running turn to end, and Ctrl+Enter
- * interrupts that turn before submitting. Steering — joining a turn mid-flight — is not a
- * gesture this front end offers, so the mode is a constant rather than a choice.
- */
+/** Inbox target for a submission that starts its own turn, used where no turn can be running. */
 const QUEUE_MODE = 'queue' as const
 const FINAL_EXIT_GRACE_MS = 3_000
 /** A lone Escape byte, which may be the first half of an Alt-modified key. */
@@ -598,19 +592,18 @@ export class TuiApp {
     }
     if (key.name === 'return' || key.name === 'enter') {
       if (key.meta) {
-        // Alt+Enter interrupts the running turn and sends the draft. Shift+Enter already
-        // inserts a newline, and two keys for one action only made the send gesture harder
-        // to find.
-        void this.submit(true)
+        this.insertText('\n')
       } else if (key.ctrl) {
-        void this.submit(true)
+        // Interrupt the running turn, then send: the escape hatch from a turn that is already
+        // on the wrong track.
+        void this.submit(this.state.running ? 'steer' : 'queue', true)
       } else if (key.shift) {
         this.insertText('\n')
       } else {
-        // Enter always queues: the row waits for the running turn to end, and Alt+Up recalls
-        // it for editing. Leaving the turn alone is the default, so only Ctrl+Enter joins a
-        // message to a turn that is already running.
-        void this.submit()
+        // Enter hands the message to whatever is running: a running turn reads it at its next
+        // step boundary, and an idle one starts a turn with it. Nothing is deferred, so there
+        // is no separate queue gesture.
+        void this.submit(this.state.running ? 'steer' : 'queue')
       }
       return
     }
@@ -864,7 +857,7 @@ export class TuiApp {
     }
   }
 
-  private async submit(interruptFirst = false): Promise<void> {
+  private async submit(mode: 'queue' | 'steer', interruptFirst = false): Promise<void> {
     const rawText = this.input
     const text = rawText.trim()
     const images = this.draftImages
@@ -904,7 +897,7 @@ export class TuiApp {
       return
     }
     this.submission = {
-      mode: QUEUE_MODE,
+      mode,
       text: text === '' ? localized.imageOnlyPrompt(images.length) : text,
       imageCount: images.length,
     }
@@ -914,7 +907,7 @@ export class TuiApp {
       await this.remote.prompt(
         this.state.sessionId,
         buildPromptContent(rawText, images),
-        QUEUE_MODE,
+        mode,
       )
       this.history.push(text === '' ? localized.imageOnlyPrompt(images.length) : text)
       this.historyIndex = this.history.length
@@ -1080,7 +1073,11 @@ export class TuiApp {
     const images = this.draftImages
     const imageCount = images.length
     if (imageCount > 0) {
-      this.submission = { mode: 'queue', text: line, imageCount }
+      this.submission = {
+        mode: this.state.running ? 'steer' : 'queue',
+        text: line,
+        imageCount,
+      }
       this.requestRender()
     }
     try {
@@ -1326,7 +1323,7 @@ export class TuiApp {
     if (selected === undefined) return
     this.editor.setText(`/${selected.name}${run ? '' : ' '}`)
     this.slashIndex = 0
-    if (run) void this.submit()
+    if (run) void this.submit(this.state.running ? 'steer' : 'queue')
     else this.requestRender()
   }
 

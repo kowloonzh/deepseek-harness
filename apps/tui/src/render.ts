@@ -1170,7 +1170,9 @@ function queueDockLines(
     const kind = item.placement === 'steering' ? 'steer' : 'queued'
     // The hint rides on the message itself so it stays visible however many are pending.
     lines.push(`${DIM}${fit(`${kind}: ${item.text || '[attachment]'}`, width)}${RESET}`)
-    lines.push(`${DIM}${fit('   Alt+Up recall · Alt+Enter interrupt and send · /queue manage', width)}${RESET}`)
+    // Only actions that apply to a queued row: a draft-level shortcut (Alt+Enter) belongs in
+    // `/help`, where its condition is stated, not beside rows it cannot touch.
+    lines.push(`${DIM}${fit('   Alt+Up recall · /queue manage', width)}${RESET}`)
   }
   if (queue.length > budget) {
     lines.push(`${DIM}${fit(`${String(queue.length - budget)} more pending · /queue manage`, width)}${RESET}`)
