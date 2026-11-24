@@ -547,6 +547,37 @@ describe('terminal rendering', () => {
     expect(cacheHitPercent({ input: 0, output: 5, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
     expect(cacheHitPercent(undefined)).toBeUndefined()
   })
+
+  it('budgets every row to a section and erases whatever sits below the frame', () => {
+    // A frame that under-counts a section paints transcript rows over the composer, and a
+    // frame that leaves rows below it keeps stale content from an earlier, taller screen.
+    const offenders: string[] = []
+    for (const rows of [10, 16, 24, 40]) {
+      for (const inputRows of [0, 1, 4]) {
+        for (const dock of [0, 2, 5]) {
+          for (const slash of [0, 3]) {
+            const state = initialTranscript()
+            state.items = Array.from({ length: 20 }, (_, i) => ({ id: `a${i}`, kind: 'assistant' as const, text: `line ${i}` }))
+            state.queue = Array.from({ length: dock }, (_, i) => ({
+              id: `q${i}`, placement: 'queued' as const, text: `queued ${i}`, imageCount: 0, fileCount: 0, editable: true,
+            }))
+            const input = Array.from({ length: inputRows }, (_, i) => `in${i}`).join('\n')
+            const frame = new TerminalRenderer().render({
+              rows, columns: 80, state, input, cursor: input.length,
+              overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+              slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
+            })
+            const painted = frame.text.split('\r\n').length
+            if (painted !== rows) offenders.push(`rows=${String(rows)} painted=${String(painted)}`)
+            if (!frame.text.includes('\u001b[0J')) offenders.push(`rows=${String(rows)} left rows below the frame`)
+            // Autowrap is restored after the erase, or the next frame wraps at the margin.
+            if (!frame.text.endsWith('\u001b[?7h')) offenders.push(`rows=${String(rows)} did not restore autowrap`)
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
 })
 
 function stripAnsi(value: string): string {

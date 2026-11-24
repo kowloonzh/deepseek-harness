@@ -22,6 +22,8 @@ const ESC = '\u001b['
 /** Stop the terminal wrapping a row that fills its last column, and restore it after. */
 const AUTOWRAP_OFF = '\u001b[?7l'
 const AUTOWRAP_ON = '\u001b[?7h'
+/** Erase from the cursor to the end of the screen, clearing rows below the frame. */
+const ERASE_BELOW = '\u001b[0J'
 const RESET = `${ESC}0m`
 const BOLD = `${ESC}1m`
 const DIM = `${ESC}2m`
@@ -60,6 +62,24 @@ export interface RenderedFrame {
   readonly cursorRow: number
   readonly cursorColumn: number
   readonly selectionRegion: RenderedSelectionRegion | undefined
+}
+
+/**
+ * Rows outside the transcript, menu, dock, and composer.
+ *
+ * The header, the blank row above the composer, the blank row below it, and the status row.
+ * A frame always carries all four, so they are budgeted once instead of per section.
+ */
+const CHROME_ROWS = 4
+
+/** How many rows each section of one frame occupies. */
+interface FrameLayout {
+  readonly body: number
+  readonly menu: number
+  readonly dock: number
+  readonly composer: number
+  readonly chrome: number
+  readonly total: number
 }
 
 interface TranscriptRenderCache {
@@ -110,6 +130,7 @@ function dumpRenderTrace(
   fullRepaint: boolean,
   lines: readonly string[],
   changedBytes: number,
+  layout: FrameLayout | undefined,
 ): void {
   const path = process.env.DSH_TUI_DEBUG_RENDER
   if (path === undefined || path === '') return
@@ -130,6 +151,13 @@ function dumpRenderTrace(
     `scroll=${String(options.scroll)}`,
     `bytes=${String(changedBytes)}`,
     `overwide=${wide.length === 0 ? '-' : wide.join(',')}`,
+    // The section sizes the frame was composed from: an overlap here is a geometry bug, and
+    // a frame that sums to `rows` without one still leaves a desync to the terminal itself.
+    layout === undefined
+      ? 'layout=-'
+      : `layout=body${String(layout.body)}+menu${String(layout.menu)}+dock${String(layout.dock)}`
+        + `+composer${String(layout.composer)}+chrome${String(layout.chrome)}`
+        + `=${String(layout.total)}/${String(rows)}`,
   ].join(' ')
   try {
     appendFileSync(path, `${record}\n`)
@@ -175,18 +203,21 @@ export class TerminalRenderer {
       columns: Math.max(20, options.columns),
       lines: frame.lines,
     }
-    dumpRenderTrace(options, incremental, changed === undefined, frame.lines, changed?.length ?? 0)
+    dumpRenderTrace(options, incremental, changed === undefined, frame.lines, changed?.length ?? 0, frame.layout)
     const body = changed ?? fullRepaint(frame.lines)
     // Autowrap is off for the paint: a row that measures one cell wider than the terminal
     // would otherwise wrap at the last column, push every following row down by one, and
     // leave the framebuffer disagreeing with `screenCache` about which row holds what.
     return {
       ...frame,
-      text: `${AUTOWRAP_OFF}${body}${AUTOWRAP_ON}`,
+      // `ESC[0J` erases from the cursor to the end of the screen, which clears whatever sits
+      // below the frame when the terminal is taller than the size it reports — content this
+      // renderer never painted and would otherwise leave behind.
+      text: `${AUTOWRAP_OFF}${body}${ERASE_BELOW}${AUTOWRAP_ON}`,
     }
   }
 
-  private compose(options: RenderViewOptions): Omit<RenderedFrame, 'text'> & { readonly lines: string[] } {
+  private compose(options: RenderViewOptions): Omit<RenderedFrame, 'text'> & { readonly lines: string[]; readonly layout: FrameLayout } {
     const width = Math.max(20, options.columns)
     const height = Math.max(10, options.rows)
     const title = options.state.title || messages.unnamedSession
@@ -213,7 +244,7 @@ export class TerminalRenderer {
     // Allocation order is by what the operator can least afford to lose: the composer
     // (already capped at height - 7), then the slash menu, then the queue dock, then the
     // transcript. Each later section takes only what is left over.
-    const chromeRows = 4
+    const chromeRows = CHROME_ROWS
     const visibleComposer = composer.lines.slice(0, Math.max(1, height - chromeRows))
     const composerRows = visibleComposer.length
     const slashRows = Math.min(slashMenu.length, Math.max(0, height - chromeRows - composerRows))
@@ -257,6 +288,14 @@ export class TerminalRenderer {
       lines,
       cursorRow,
       cursorColumn,
+      layout: {
+        body: selectedBody.length,
+        menu: visibleSlashMenu.length,
+        dock: dock.length,
+        composer: visibleComposer.length,
+        chrome: CHROME_ROWS,
+        total: lines.length,
+      },
       selectionRegion: options.overlay === undefined
         ? { top: 2, rows: paddedBody.map(stripAnsi) }
         : undefined,
