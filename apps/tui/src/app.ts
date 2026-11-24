@@ -578,14 +578,6 @@ export class TuiApp {
       }
       return
     }
-    // `Ctrl+X` is the same gesture as `Ctrl+Enter`. It arrives as the single control byte
-    // 0x18 instead of an enhanced sequence, so it also works where a keyboard or terminal
-    // never reports a modified Enter — a right-hand Ctrl on some layouts among them.
-    if (key.name === 'x' && key.ctrl) {
-      void this.submit(true)
-      this.requestRender()
-      return
-    }
     if (!key.ctrl && !key.meta && sequence !== '' && !isNavigationSequence(sequence)) {
       this.insertText(sequence.replaceAll('\r', '\n'))
     }

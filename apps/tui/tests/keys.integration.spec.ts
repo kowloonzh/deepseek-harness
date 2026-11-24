@@ -24,8 +24,6 @@ const KEY = {
   escape: '\u001b',
   /** Ctrl+Enter over the Kitty keyboard protocol. */
   ctrlEnter: '\u001b[13;5u',
-  /** Ctrl+X is a single control byte, so it needs no protocol support. */
-  ctrlX: '\u0018',
 } as const
 
 /**
@@ -135,12 +133,6 @@ describe('composer keys', () => {
     } finally {
       await terminal.stop()
     }
-  }, 60_000)
-
-  it('interrupts and sends on Ctrl+X', async () => {
-    // Ctrl+X is one control byte, the gesture that survives a keyboard whose right-hand Ctrl
-    // never reports a modified Enter.
-    await expectSentDraftBreaksOut(KEY.ctrlX)
   }, 60_000)
 
   it('interrupts and sends on Ctrl+Enter', async () => {

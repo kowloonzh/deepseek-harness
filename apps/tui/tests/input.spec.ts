@@ -150,11 +150,11 @@ describe('slash line routing with staged images', () => {
 })
 
 describe('interrupt-and-send keys', () => {
-  it('delivers Ctrl+Enter as an enhanced sequence and Ctrl+X as one control byte', () => {
-    // Terminals that report a modified Enter use the Kitty protocol form; Ctrl+X arrives as
-    // 0x18 everywhere, including keyboards whose right-hand Ctrl never reports a modified
-    // Enter at all.
-    expect(decodeTerminalInput('\u001b[13;5u')[0]).toMatchObject({ name: 'return', ctrl: true })
-    expect(decodeTerminalInput('\u0018')[0]).toMatchObject({ name: 'x', ctrl: true })
+  it('delivers Alt+Enter in both terminal encodings', () => {
+    // A legacy terminal sends ESC CR; one reporting modified keys uses the Kitty form.
+    expect(decodeTerminalInput('\u001b\r')[0]).toMatchObject({ name: 'return', meta: true })
+    expect(decodeTerminalInput('\u001b[13;3u')[0]).toMatchObject({ name: 'return', meta: true })
+    // Shift+Enter stays the newline key.
+    expect(decodeTerminalInput('\u001b[13;2u')[0]).toMatchObject({ name: 'return', shift: true })
   })
 })
