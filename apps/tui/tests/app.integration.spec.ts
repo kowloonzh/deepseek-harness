@@ -7,6 +7,7 @@ import { launchWebScaffold } from '../../web/tests/scaffold.ts'
 import { TuiApp } from '../src/app.ts'
 import { normalizeEntryUrl } from '../src/host.ts'
 import { TuiRemoteClient } from '../src/remote.ts'
+import { EmulatedTerminal } from './terminal.ts'
 
 /**
  * Text the composer currently holds for `app`, or '' when it is not painted yet.
@@ -44,7 +45,13 @@ describe('terminal prompt lifecycle', () => {
     stdout.rows = 24
     stdout.columns = 120
     let text = ''
-    output.on('data', (chunk: Buffer) => { text += chunk.toString() })
+    // Frames are cell diffs, so the reply is asserted on the emulated screen, not the raw bytes.
+    const terminal = new EmulatedTerminal(120, 24)
+    let painted = Promise.resolve()
+    output.on('data', (chunk: Buffer) => {
+      text += chunk.toString()
+      painted = painted.then(() => terminal.write(chunk))
+    })
     let app: TuiApp | undefined
     const remote = await TuiRemoteClient.connect({
       ...normalizeEntryUrl(host.authenticatedUrl), close: async () => {},
@@ -85,8 +92,9 @@ describe('terminal prompt lifecycle', () => {
       await settled
       // The status row marks a running turn and drops the marker when the turn settles.
       await expect.poll(() => (app?.screenLines() ?? []).join('\n')).not.toContain('| running')
-      expect(text).toContain('Event sourcing')
-      expect(text).toMatch(/event.sourc/iu)
+      await painted
+      expect(terminal.text()).toContain('Event sourcing')
+      expect(terminal.text()).toMatch(/event.sourc/iu)
       expect(text).not.toContain('model: default')
       expect(text).not.toContain('kill/yank')
       // The composer only appears once a frame has been painted, so wait for the
@@ -124,6 +132,7 @@ describe('terminal prompt lifecycle', () => {
       expect(text).toContain(`dsh tui --resume ${sessionId}`)
       input.destroy()
       output.destroy()
+      terminal.dispose()
       await host.close()
     }
   }, 60_000)

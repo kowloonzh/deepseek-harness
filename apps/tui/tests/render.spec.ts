@@ -2,15 +2,30 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  bottomPaneLimit,
   cacheHitPercent,
+  LATEST,
   renderMarkdownLines,
   renderView,
   selectedText,
   TerminalRenderer,
+  type RenderViewOptions,
+  type TranscriptPosition,
   wrapText,
 } from '../src/render.ts'
+import { EmulatedTerminal } from './terminal.ts'
 import { initialTranscript } from '../src/transcript.ts'
 import type { SlashSuggestion } from '../src/ui.ts'
+
+/**
+ * The position `rows` back from the latest rows of a frame rendered with `options`.
+ * @param options - the frame to scroll.
+ * @param rows - how far back.
+ * @returns a reading position.
+ */
+function scrolledBack(options: Omit<RenderViewOptions, 'scroll'>, rows: number): TranscriptPosition {
+  return new TerminalRenderer().render({ ...options, scroll: LATEST }).scrollBy(-rows)
+}
 
 const suggest = (count: number): SlashSuggestion[] =>
   Array.from({ length: count }, (_, i) => ({ name: `cmd${i}`, description: 'd', source: 'command' }))
@@ -28,7 +43,7 @@ describe('terminal rendering', () => {
     ]
     const raw = renderView({
       rows: 20, columns: 80, state, input: '', cursor: 0,
-      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
     }).text
     const rendered = stripAnsi(raw)
     expect(rendered).toContain('hello')
@@ -57,7 +72,7 @@ describe('terminal rendering', () => {
         resolve: () => {},
       },
       expandedTools: false,
-      scroll: 0,
+      scroll: LATEST,
       notice: undefined,
     })
     expect(frame.text).toContain('Approval required')
@@ -84,7 +99,7 @@ describe('terminal rendering', () => {
       }],
       overlay: undefined,
       expandedTools: false,
-      scroll: 0,
+      scroll: LATEST,
       notice: undefined,
     })
     const lines = stripAnsi(frame.text).split('\n')
@@ -107,7 +122,7 @@ describe('terminal rendering', () => {
     const render = (input: string, cursor: number) => {
       const frame = renderView({
         rows: 24, columns: 80, state, input, cursor,
-        overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+        overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
       })
       const lines = stripAnsi(frame.text).split('\n')
       const top = lines.findIndex(line => line.startsWith('╭'))
@@ -118,7 +133,9 @@ describe('terminal rendering', () => {
     const twoLines = render('first\nsecond', 12)
     expect(oneLine.height).toBe(2)
     expect(oneLine.lines[oneLine.top - 1]).toBe('')
-    expect(oneLine.lines[oneLine.bottom + 1]).toBe('')
+    // The status row sits directly under the composer, as codex's footer does.
+    expect(oneLine.lines[oneLine.bottom + 1]).toBe(oneLine.lines.at(-1))
+    expect(oneLine.bottom + 2).toBe(oneLine.lines.length)
     expect(twoLines.height).toBe(3)
   })
 
@@ -136,7 +153,7 @@ describe('terminal rendering', () => {
     const frame = renderView({
       rows: 24, columns: 120, state, input: '', cursor: 0,
       submission: { mode: 'steer', text: 'current', imageCount: 1 },
-      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
     })
     expect(frame.text).toContain('sending steer: current [1 image]')
     expect(frame.text).toContain('queued: later')
@@ -194,10 +211,13 @@ describe('terminal rendering', () => {
         toolArguments: '{"url":"https://b.test/two"}', toolOutput: 'two',
       },
     ]
-    const frame = (expandedTools: boolean, scroll = 0) => stripAnsi(renderView({
-      rows: 50, columns: 80, state, input: '', cursor: 0,
-      overlay: undefined, expandedTools, scroll, notice: undefined,
-    }).text)
+    const frame = (expandedTools: boolean, back = 0) => {
+      const options = {
+        rows: 50, columns: 80, state, input: '', cursor: 0,
+        overlay: undefined, expandedTools, notice: undefined,
+      }
+      return stripAnsi(renderView({ ...options, scroll: back === 0 ? LATEST : scrolledBack(options, back) }).text)
+    }
     const folded = frame(false)
     expect(folded).toContain('Edited notes.md (+2 -1)')
     expect(folded).toContain('Ran · failed false')
@@ -232,13 +252,13 @@ describe('terminal rendering', () => {
       ],
       slashSuggestionIndex: 0,
       slashLoading: false,
-      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
     }).text)
     expect(frame).toContain('❯ /icai Research workflow [skill]')
     expect(frame).toContain('/install Install something')
   })
 
-  it('repaints only changed rows for incremental scroll frames', () => {
+  it('repaints only changed cells for incremental scroll frames', async () => {
     const state = initialTranscript()
     state.items = Array.from({ length: 30 }, (_, index) => ({
       id: `system-${String(index)}`,
@@ -256,11 +276,19 @@ describe('terminal rendering', () => {
       expandedTools: false,
       notice: undefined,
     }
-    const first = renderer.render({ ...options, scroll: 0 })
-    const second = renderer.render({ ...options, scroll: 3 }, true)
-    expect(first.text).toContain('\u001b[2J')
-    expect(second.text).not.toContain('\u001b[2J')
-    expect(second.text).toMatch(/\u001b\[\d+;1H\u001b\[2K/u)
+    const first = renderer.render({ ...options, scroll: LATEST })
+    const back = first.scrollBy(-3)
+    const second = renderer.render({ ...options, scroll: back }, true)
+    expect(first.paint).toContain('\u001b[2J')
+    expect(second.paint).not.toContain('\u001b[2J')
+    expect(second.paint.length).toBeLessThan(first.paint.length)
+    // The diff leaves the terminal exactly where a full repaint of the second frame would.
+    const incremental = new EmulatedTerminal(80, 20)
+    await incremental.write(first.paint + second.paint)
+    const full = new EmulatedTerminal(80, 20)
+    await full.write(new TerminalRenderer().render({ ...options, scroll: back }).paint)
+    expect(incremental.text()).toBe(full.text())
+    expect(incremental.text()).toContain('history 26')
   })
 
   it('highlights and extracts a mouse-selected transcript range', () => {
@@ -277,7 +305,7 @@ describe('terminal rendering', () => {
       cursor: 0,
       overlay: undefined,
       expandedTools: false,
-      scroll: 0,
+      scroll: LATEST,
       notice: undefined,
     }
     const unselected = renderView(base)
@@ -390,7 +418,7 @@ describe('terminal rendering', () => {
     const rendered = stripAnsi(renderView({
       rows: 24, columns: 100, state, input: '', cursor: 0,
       overlay: { kind: 'models', items: [choice], index: 0, stage: 'effort', chosen: choice, effortIndex: 1 },
-      expandedTools: false, scroll: 0, notice: undefined,
+      expandedTools: false, scroll: LATEST, notice: undefined,
     }).text)
     expect(rendered).toContain('Reasoning depth')
     expect(rendered).toContain('DeepSeek / DeepSeek V4')
@@ -414,7 +442,7 @@ describe('terminal rendering', () => {
           { provider: 'plain', providerName: 'Plain', model: 'chat', modelName: 'Chat', efforts: [] },
         ],
       },
-      expandedTools: false, scroll: 0, notice: undefined,
+      expandedTools: false, scroll: LATEST, notice: undefined,
     }).text)
     expect(rendered).toContain('1 depths')
     expect(rendered).toContain('Plain / Chat')
@@ -428,7 +456,7 @@ describe('terminal rendering', () => {
     state.items = [{ id: 'a', kind: 'assistant', text: 'hi' }]
     const rendered = renderView({
       rows: 20, columns: 60, state, input: '', cursor: 0,
-      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
     }).text
     expect(rendered).not.toContain('\u001b]8;;https')
     expect(stripAnsi(rendered)).not.toContain('8;;')
@@ -443,7 +471,7 @@ describe('terminal rendering', () => {
     state.items = [{ id: 'a', kind: 'assistant', text: 'see [YG-4021](https://jira.test/browse/YG-4021)' }]
     const raw = renderView({
       rows: 20, columns: 60, state, input: '', cursor: 0,
-      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
     }).text
     const visible = stripAnsi(raw)
     expect(visible).toContain('YG-4021')
@@ -473,7 +501,7 @@ describe('terminal rendering', () => {
               const renderer = new TerminalRenderer()
               const frame = renderer.render({
                 rows, columns, state, input, cursor: input.length,
-                overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+                overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
                 slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
               })
               // A full frame clears and rewrites every row, so its row count is the frame height.
@@ -498,7 +526,7 @@ describe('terminal rendering', () => {
     state.items = [{ id: 'a', kind: 'assistant', text: 'hello' }]
     const frame = new TerminalRenderer().render({
       rows: 10, columns: 60, state, input: 'typing', cursor: 6,
-      overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
       slashSuggestions: suggest(6),
       slashSuggestionIndex: 0,
     })
@@ -523,7 +551,7 @@ describe('terminal rendering', () => {
         if (where === 'title') state.title = text
         const frame = new TerminalRenderer().render({
           rows: 20, columns: 80, state, input: '', cursor: 0,
-          overlay: undefined, expandedTools: true, scroll: 0,
+          overlay: undefined, expandedTools: true, scroll: LATEST,
           notice: where === 'notice' ? text : undefined,
         })
         // Strip the renderer's own escapes, then look for any remaining control character.
@@ -548,9 +576,9 @@ describe('terminal rendering', () => {
     expect(cacheHitPercent(undefined)).toBeUndefined()
   })
 
-  it('budgets every row to a section and erases whatever sits below the frame', () => {
-    // A frame that under-counts a section paints transcript rows over the composer, and a
-    // frame that leaves rows below it keeps stale content from an earlier, taller screen.
+  it('budgets every row to a section and paints incremental frames like full ones', async () => {
+    // A frame that under-counts a section paints transcript rows over the composer, and an
+    // incremental frame that disagrees with a full one leaves stale cells from earlier frames.
     const offenders: string[] = []
     for (const rows of [10, 16, 24, 40]) {
       for (const inputRows of [0, 1, 4]) {
@@ -563,29 +591,183 @@ describe('terminal rendering', () => {
             }))
             const input = Array.from({ length: inputRows }, (_, i) => `in${i}`).join('\n')
             const renderer = new TerminalRenderer()
-            const frame = renderer.render({
+            const options = {
               rows, columns: 80, state, input, cursor: input.length,
-              overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+              overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
               slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
-            })
+            }
+            const frame = renderer.render(options)
             const painted = frame.text.split('\r\n').length
             if (painted !== rows) offenders.push(`rows=${String(rows)} painted=${String(painted)}`)
-            if (!frame.text.includes('\u001b[0J')) offenders.push(`rows=${String(rows)} left rows below the frame`)
-            // An incremental frame stops at its last changed row, so erasing below it would
-            // wipe the composer and status line sitting underneath.
-            const incremental = renderer.render({
-              rows, columns: 80, state, input: `${input}x`, cursor: input.length + 1,
-              overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
-              slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
-            }, true)
-            if (incremental.text.includes('\u001b[0J')) offenders.push(`rows=${String(rows)} incremental frame erased below itself`)
-            // Autowrap is restored after the erase, or the next frame wraps at the margin.
-            if (!frame.text.endsWith('\u001b[?7h')) offenders.push(`rows=${String(rows)} did not restore autowrap`)
+            // Growing the draft by one row and back changes the composer's height, which moves
+            // every section boundary at once.
+            const grown = { ...options, input: `${input}\nx`, cursor: input.length + 2 }
+            const incremental = new EmulatedTerminal(80, rows)
+            await incremental.write(frame.paint)
+            await incremental.write(renderer.render(grown, true).paint)
+            await incremental.write(renderer.render(options, true).paint)
+            const full = new EmulatedTerminal(80, rows)
+            await full.write(new TerminalRenderer().render(options).paint)
+            if (incremental.text() !== full.text()) offenders.push(`rows=${String(rows)} input=${String(inputRows)} dock=${String(dock)} slash=${String(slash)} diverged`)
+            if (incremental.cursor().y !== full.cursor().y) offenders.push(`rows=${String(rows)} cursor diverged`)
+            // Autowrap is restored at the end, or the shell wraps oddly after exit.
+            if (!frame.paint.includes('\u001b[?7h')) offenders.push(`rows=${String(rows)} did not restore autowrap`)
+            incremental.dispose()
+            full.dispose()
           }
         }
       }
     }
     expect(offenders).toEqual([])
+  })
+
+  it('caps the bottom pane at two thirds and gives the transcript every other row', () => {
+    // codex's composer_height_limit: the transcript keeps at least a third of the screen however
+    // tall the draft or the dock grows.
+    const offenders: string[] = []
+    for (const rows of [10, 16, 24, 40, 60]) {
+      for (const inputRows of [0, 3, 12, 40]) {
+        for (const dock of [0, 3, 8]) {
+          const state = initialTranscript()
+          state.items = Array.from({ length: 80 }, (_, i) => ({ id: `a${i}`, kind: 'assistant' as const, text: `line ${i}` }))
+          state.queue = Array.from({ length: dock }, (_, i) => ({
+            id: `q${i}`, placement: 'queued' as const, text: `queued ${i}`, imageCount: 0, fileCount: 0, editable: true,
+          }))
+          const input = Array.from({ length: inputRows }, (_, i) => `in${i}`).join('\n')
+          const frame = renderView({
+            rows, columns: 80, state, input, cursor: input.length,
+            overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
+          })
+          const lines = stripAnsi(frame.text).split('\n')
+          const area = rows - 1
+          const top = lines.findIndex(line => line.startsWith('╭'))
+          // Everything from the first dock row (or the composer) to the status row.
+          const paneTop = lines.findIndex(line => /^(?:queued|   Alt\+Up|\d+ more pending|╭)/u.test(line))
+          const bottomRows = rows - paneTop
+          if (bottomRows > bottomPaneLimit(area)) offenders.push(`rows=${String(rows)} input=${String(inputRows)} dock=${String(dock)} bottom=${String(bottomRows)}`)
+          // One gap row separates the two unless the screen is too short to spare it.
+          const gap = area - bottomRows >= 2 ? 1 : 0
+          if (frame.transcriptRows < 1 || frame.transcriptRows !== area - bottomRows - gap) offenders.push(`rows=${String(rows)} input=${String(inputRows)} dock=${String(dock)} transcript=${String(frame.transcriptRows)}`)
+          if (top < 0 || frame.cursorRow <= top || frame.cursorRow >= rows) offenders.push(`rows=${String(rows)} input=${String(inputRows)} cursor=${String(frame.cursorRow)}`)
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('paints slash suggestions over the transcript without moving the composer', () => {
+    const state = initialTranscript()
+    state.items = Array.from({ length: 40 }, (_, i) => ({ id: `a${i}`, kind: 'assistant' as const, text: `line ${i}` }))
+    const base = {
+      rows: 24, columns: 80, state, input: '/', cursor: 1,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
+    }
+    const closed = stripAnsi(renderView(base).text).split('\n')
+    const open = renderView({ ...base, slashSuggestions: suggest(4), slashSuggestionIndex: 0 })
+    const opened = stripAnsi(open.text).split('\n')
+    const composer = closed.findIndex(line => line.startsWith('╭'))
+    expect(opened.findIndex(line => line.startsWith('╭'))).toBe(composer)
+    // The four menu rows replace the gap and the three transcript rows above it; nothing else moves.
+    expect(opened.slice(composer - 4, composer).map(line => line.trim().replace(/^❯ /u, ''))).toEqual(['/cmd0 d', '/cmd1 d', '/cmd2 d', '/cmd3 d'])
+    expect(opened.slice(0, composer - 4)).toEqual(closed.slice(0, composer - 4))
+    expect(opened.slice(composer)).toEqual(closed.slice(composer))
+    // A covered row is not selectable.
+    expect(open.selectionRegion?.rows.at(-1)).toBe('')
+  })
+
+  it('starts a short conversation at the top of the transcript area', () => {
+    const state = initialTranscript()
+    state.items = [{ id: 'a', kind: 'assistant', text: 'only reply' }]
+    const lines = stripAnsi(renderView({
+      rows: 24, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
+    }).text).split('\n')
+    expect(lines.findIndex(line => line.includes('only reply'))).toBeLessThanOrEqual(2)
+  })
+
+  it('keeps the transcript in view while an approval waits above the composer', () => {
+    const state = initialTranscript()
+    state.items = Array.from({ length: 40 }, (_, i) => ({ id: `a${i}`, kind: 'assistant' as const, text: `line ${i}` }))
+    const frame = renderView({
+      rows: 30, columns: 80, state, input: 'draft', cursor: 5,
+      overlay: { kind: 'approval', request: { toolName: 'bash', reason: 'write outside workspace' }, resolve: () => {} },
+      expandedTools: false, scroll: LATEST, notice: undefined,
+    })
+    const lines = stripAnsi(frame.text).split('\n')
+    const approval = lines.findIndex(line => line.includes('Approval required'))
+    const composer = lines.findIndex(line => line.startsWith('╭'))
+    expect(lines.slice(1, approval).join('\n')).toContain('line 39')
+    expect(approval).toBeGreaterThan(0)
+    expect(approval).toBeLessThan(composer)
+    expect(lines[composer + 1]).toContain('draft')
+    expect(frame.scrollBy(-1).kind).toBe('reading')
+  })
+
+  it('keeps a reading position on its content as rows arrive and the terminal resizes', () => {
+    const state = initialTranscript()
+    const reply = (i: number) => ({ id: `a${String(i)}`, kind: 'assistant' as const, text: `reply ${String(i)} ${'word '.repeat(30)}` })
+    state.items = Array.from({ length: 30 }, (_, i) => reply(i))
+    const options = {
+      rows: 24, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, notice: undefined,
+    }
+    const renderer = new TerminalRenderer()
+    const latest = renderer.render({ ...options, scroll: LATEST })
+    const back = latest.scrollBy(-20)
+    const reading = renderer.render({ ...options, scroll: back })
+    const topText = (frame: { readonly selectionRegion: { readonly rows: readonly string[] } | undefined }) =>
+      frame.selectionRegion?.rows.find(row => row.trim() !== '')?.trim()
+    const pinned = topText(reading)
+    expect(reading.position.kind).toBe('reading')
+    expect(stripAnsi(reading.text)).toContain('↓ bottom · Esc')
+
+    // New replies stream in below: a row count from the bottom would slide, the anchor does not.
+    const grown = { ...state, items: [...state.items, reply(30), reply(31), reply(32)] }
+    const after = renderer.render({ ...options, state: grown, scroll: reading.position })
+    expect(topText(after)).toBe(pinned)
+
+    // A narrower terminal rewraps every reply; the view still opens inside the same reply.
+    const narrow = renderer.render({ ...options, columns: 50, state: grown, scroll: after.position })
+    expect(after.position.kind === 'reading' && narrow.position.kind === 'reading').toBe(true)
+    if (after.position.kind === 'reading' && narrow.position.kind === 'reading') {
+      expect(narrow.position.key).toBe(after.position.key)
+      expect(narrow.position.span).toBeGreaterThan(after.position.span)
+    }
+  })
+
+  it('returns to the latest rows once scrolling reaches the bottom', () => {
+    const state = initialTranscript()
+    state.items = Array.from({ length: 40 }, (_, i) => ({ id: `a${String(i)}`, kind: 'assistant' as const, text: `line ${String(i)}` }))
+    const options = {
+      rows: 24, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, notice: undefined,
+    }
+    const renderer = new TerminalRenderer()
+    const back = renderer.render({ ...options, scroll: LATEST }).scrollBy(-5)
+    const reading = renderer.render({ ...options, scroll: back })
+    expect(reading.scrollBy(3).kind).toBe('reading')
+    expect(reading.scrollBy(5)).toEqual(LATEST)
+    // Scrolling far past the top stays on the first row instead of piling up offset.
+    const top = renderer.render({ ...options, scroll: reading.scrollBy(Number.NEGATIVE_INFINITY) })
+    expect(top.selectionRegion?.rows[0]).toContain('line 0')
+    expect(top.scrollBy(1).kind).toBe('reading')
+  })
+
+  it('holds a reading position at the bottom while a selection pins it', () => {
+    const state = initialTranscript()
+    state.items = Array.from({ length: 40 }, (_, i) => ({ id: `a${String(i)}`, kind: 'assistant' as const, text: `line ${String(i)}` }))
+    const options = {
+      rows: 24, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, notice: undefined,
+    }
+    const renderer = new TerminalRenderer()
+    const pinned = renderer.render({ ...options, scroll: LATEST }).scrollBy(0)
+    expect(renderer.render({ ...options, scroll: pinned }).position).toEqual(LATEST)
+    const held = renderer.render({ ...options, scroll: pinned, holdPosition: true })
+    expect(held.position.kind).toBe('reading')
+    const grown = { ...state, items: [...state.items, { id: 'new', kind: 'assistant' as const, text: 'streamed' }] }
+    const after = renderer.render({ ...options, state: grown, scroll: held.position, holdPosition: true })
+    expect(after.selectionRegion?.rows).toEqual(held.selectionRegion?.rows)
   })
 
   it('keeps double-width glyphs off the last column of a row', () => {
@@ -601,7 +783,7 @@ describe('terminal rendering', () => {
         state.items = [{ id: 'a', kind: 'assistant', text }]
         const frame = new TerminalRenderer().render({
           rows: 20, columns, state, input: '', cursor: 0,
-          overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+          overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
         })
         const rows = stripAnsi(frame.text).split('\n')
         for (const [index, row] of rows.entries()) {
@@ -631,7 +813,7 @@ describe('terminal rendering', () => {
         state.items = [{ id: 'a', kind: 'assistant', text }]
         const frame = new TerminalRenderer().render({
           rows: 20, columns, state, input: '', cursor: 0,
-          overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+          overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
         })
         for (const [index, row] of stripAnsi(frame.text).split('\n').entries()) {
           const width = cellWidth(row)

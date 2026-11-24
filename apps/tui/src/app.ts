@@ -22,8 +22,10 @@ import { TuiError } from './error.ts'
 import {
   cacheHitPercent,
   selectedText,
+  LATEST,
   TerminalRenderer,
   type RenderedFrame,
+  type TranscriptPosition,
   type TerminalPoint,
   type TerminalSelection,
 } from './render.ts'
@@ -79,22 +81,9 @@ const DEFAULT_IMAGE_LIMITS = {
   maxImagesPerMessage: 20,
   maxMessageImageBytes: 200 * 1024 * 1024,
 } as const
-/** Grace after `stop` for `dispose` to finish before the process exits anyway. */
-/**
- * Whether the terminal screen is owned by this app.
- *
- * Inline mode paints a viewport at the cursor and lets the terminal keep the history it
- * scrolls past, so finished conversation stays in native scrollback. Fullscreen mode owns the
- * alternate screen instead. Inline is the default because the composer can only be covered by
- * rows this app painted, never by rows the terminal scrolled.
- */
-const SCREEN_MODE = process.env.DSH_TUI_SCREEN === 'fullscreen' ? 'fullscreen' : 'inline'
-
-/** Escape introducer for the inline painter's own cursor and erase sequences. */
-const ESC = '\u001b['
-
 /** Inbox target for a submission that starts its own turn, used where no turn can be running. */
 const QUEUE_MODE = 'queue' as const
+/** Grace after `stop` for `dispose` to finish before the process exits anyway. */
 const FINAL_EXIT_GRACE_MS = 3_000
 /** A lone Escape byte, which may be the first half of an Alt-modified key. */
 const ESCAPE_PREFIX = '\u001b'
@@ -190,20 +179,16 @@ export class TuiApp {
   private historyIndex = 0
   private overlay: Overlay | undefined
   private readonly queuedInteractions: Array<ApprovalPrompt | QuestionPrompt> = []
-  private readonly scroll = { value: 0 }
+  /** Where the transcript view sits; a reading position stays on its content as rows arrive. */
+  private position: TranscriptPosition = LATEST
+  /** The position a mouse press left, restored when the press turns out to be a plain click. */
+  private positionBeforePress: TranscriptPosition | undefined
   private readonly renderer = new TerminalRenderer()
   private readonly expandedTools = { value: false }
   private notice: string | undefined
   private followAbort: AbortController | undefined
   private readonly subscriptions = new Set<Promise<void>>()
   private renderTimer: NodeJS.Timeout | undefined
-  /** Rows of the inline viewport painted last frame, and where its cursor sat. */
-  private inlineRows: readonly string[] = []
-  private inlineCursorRow = 1
-  /** Transcript rows already handed to the terminal scrollback, never repainted. */
-  private committedLines = 0
-  /** Columns the committed history was laid out at; a width change invalidates it. */
-  private committedWidth = 0
   /** A lone Escape byte held until its partner arrives or the window closes. */
   private pendingEscape = ''
   private escapeTimer: NodeJS.Timeout | undefined
@@ -329,7 +314,9 @@ export class TuiApp {
     // A resized terminal invalidates every row position, and the pane that resized the tty
     // may not have reported the new size when the pending incremental frame was queued.
     // Rebuilding the whole screen makes the paint independent of whether that frame ran
-    // against the previous dimensions.
+    // against the previous dimensions. A selection is held in screen cells, which the
+    // rewrapped transcript no longer lines up with, so it is dropped.
+    this.selection = undefined
     this.requestRender(false)
   }
 
@@ -426,8 +413,8 @@ export class TuiApp {
         this.setNotice(messages.queueEditCancelled)
         return
       }
-      if (this.scroll.value > 0) {
-        this.scroll.value = 0
+      if (this.position.kind === 'reading') {
+        this.position = LATEST
         this.requestRender()
         return
       }
@@ -465,9 +452,22 @@ export class TuiApp {
       this.requestRender()
       return
     }
+    // Ctrl+Home and Ctrl+End jump to either end of the transcript, as codex's keys do.
+    if (key.ctrl && key.name === 'home') {
+      this.selection = undefined
+      this.scrollBy(Number.NEGATIVE_INFINITY)
+      this.requestRender()
+      return
+    }
+    if (key.ctrl && key.name === 'end') {
+      this.selection = undefined
+      this.position = LATEST
+      this.requestRender()
+      return
+    }
     if (key.name === 'pageup') {
       this.selection = undefined
-      this.scroll.value += 10
+      this.scrollBy(-this.pageRows())
       this.requestRender()
       return
     }
@@ -477,19 +477,19 @@ export class TuiApp {
     }
     if (key.name === 'pagedown') {
       this.selection = undefined
-      this.scroll.value = Math.max(0, this.scroll.value - 10)
+      this.scrollBy(this.pageRows())
       this.requestRender()
       return
     }
     if (key.name === 'wheel-up') {
       this.selection = undefined
-      this.scroll.value += 1
+      this.scrollBy(-1)
       this.requestRender()
       return
     }
     if (key.name === 'wheel-down') {
       this.selection = undefined
-      this.scroll.value = Math.max(0, this.scroll.value - 1)
+      this.scrollBy(1)
       this.requestRender()
       return
     }
@@ -897,7 +897,7 @@ export class TuiApp {
       this.history.push(text)
       this.historyIndex = this.history.length
       this.editor.clear()
-      this.scroll.value = 0
+      this.position = LATEST
       await this.runShell(shell.command)
       this.requestRender()
       return
@@ -910,7 +910,7 @@ export class TuiApp {
       this.history.push(text)
       this.historyIndex = this.history.length
       this.editor.clear()
-      this.scroll.value = 0
+      this.position = LATEST
       if (this.localCommandName(text) !== undefined) await this.runTerminalCommand(text)
       else await this.runSlashLine(text, this.state.sessionId)
       this.requestRender()
@@ -933,7 +933,7 @@ export class TuiApp {
       this.historyIndex = this.history.length
       this.editor.clear()
       this.draftImages = []
-      this.scroll.value = 0
+      this.position = LATEST
       this.setNotice(undefined)
     } catch (error) {
       this.addError(error)
@@ -1303,7 +1303,7 @@ export class TuiApp {
     this.state = { ...initialTranscript(), sessionId, cwd: process.cwd(), model: this.defaultModel }
     this.slashSuggestions = this.localSlashSuggestions()
     this.slashIndex = 0
-    this.scroll.value = 0
+    this.position = LATEST
     if (announce) this.addSystem(localized.opened(sessionId))
     for (const task of [this.consumeFollow(sessionId, abort), this.consumeControl(abort), this.consumeState(sessionId, abort)]) {
       this.subscriptions.add(task)
@@ -1451,7 +1451,7 @@ export class TuiApp {
   private insertText(text: string): void {
     this.editor.insert(text)
     this.slashIndex = 0
-    this.scroll.value = 0
+    this.position = LATEST
     this.requestRender()
   }
 
@@ -1538,10 +1538,7 @@ export class TuiApp {
   private renderStartup(): void {
     if (this.stopped || this.startupRendered) return
     this.startupRendered = true
-    // The title is printed once above the viewport; inline mode leaves it in the scrollback
-    // when the viewport takes over, and fullscreen mode clears it before the first frame.
-    const prefix = SCREEN_MODE === 'fullscreen' ? '\u001b[2J\u001b[H' : ''
-    this.stdout.write(`${prefix}${messages.appTitle}\r\n${messages.starting}\r\n`)
+    this.stdout.write(`\u001b[2J\u001b[H${messages.appTitle}\r\n${messages.starting}\r\n`)
   }
 
   private render(incremental: boolean): void {
@@ -1560,80 +1557,33 @@ export class TuiApp {
       slashLoading: this.slashLoading,
       overlay: this.overlay,
       expandedTools: this.expandedTools.value,
-      scroll: this.scroll.value,
+      scroll: this.position,
+      holdPosition: this.selection !== undefined,
       notice: this.notice,
       selection: this.selection,
     }, incremental)
     this.lastFrame = frame
-    if (SCREEN_MODE === 'fullscreen') {
-      this.stdout.write(frame.text)
-      this.stdout.write(`\u001b[${String(frame.cursorRow)};${String(frame.cursorColumn)}H\u001b[?25h`)
-      return
-    }
-    this.paintInline(frame)
+    // The resolved position: re-anchored to the row now on top, or back to Latest once the
+    // view reached the bottom.
+    this.position = frame.position
+    this.stdout.write(frame.paint)
   }
 
   /**
-   * Paint the viewport in place, letting the terminal keep what scrolls past it.
-   *
-   * The frame's rows are the viewport: the transcript tail, the queue dock, the composer, and
-   * the status row. Rows the transcript has outgrown are printed once above the viewport with
-   * a newline, which moves them into the terminal's own scrollback and takes them out of this
-   * app's accounting. Only the composer and the rows above it are rewritten each frame, and
-   * every rewritten row is erased first, so no earlier paint can survive underneath.
-   * @param frame - the composed viewport and the cursor it wants.
+   * Move the transcript view, anchoring it to the content it lands on.
+   * @param rows - negative toward older content, positive toward the latest.
    */
-  private paintInline(frame: RenderedFrame): void {
-    const rows = frame.text.split('\r\n')
-    const lines = rows
-    const commit = this.pendingCommitLines(lines.length)
-    const out: string[] = []
-    // Return to the viewport top from wherever the last frame left the cursor.
-    const up = this.inlineRows.length === 0 ? 0 : Math.min(this.inlineCursorRow - 1, this.inlineRows.length - 1)
-    if (up > 0) out.push(`${ESC}${String(up)}A`)
-    out.push(`${ESC}1G`)
-    // Committed rows are written once and never revisited; the newlines carry them into the
-    // scrollback, which is why this app never has to repaint history.
-    for (const line of commit) out.push(`${ESC}2K${line}\r\n`)
-    for (const [index, line] of lines.entries()) {
-      out.push(`${ESC}2K${line}`)
-      if (index < lines.length - 1) out.push('\r\n')
-    }
-    const down = lines.length - frame.cursorRow
-    if (down > 0) out.push(`${ESC}${String(down)}A`)
-    out.push(`${ESC}${String(Math.max(1, frame.cursorColumn))}G\u001b[?25h`)
-    this.inlineRows = lines
-    this.inlineCursorRow = frame.cursorRow
-    this.stdout.write(out.join(''))
+  private scrollBy(rows: number): void {
+    if (this.lastFrame !== undefined) this.position = this.lastFrame.scrollBy(rows)
   }
 
   /**
-   * Transcript rows that have scrolled out of the viewport and now belong to scrollback.
-   *
-   * A width change invalidates every row already written, because the terminal owns those
-   * rows and cannot rewrap them: the history is cleared and rebuilt from the transcript this
-   * app still holds.
-   * @param viewportRows - rows the viewport will occupy this frame.
-   * @returns rows to print above the viewport, oldest first.
+   * Rows one page scroll moves: the transcript area less one, so the last row of the old page
+   * stays on screen as context, as codex's page keys do.
+   * @returns at least one row.
    */
-  private pendingCommitLines(viewportRows: number): readonly string[] {
-    const width = Math.max(20, this.stdout.columns)
-    const body = this.renderer.transcriptLines()
-    if (width !== this.committedWidth) {
-      this.committedWidth = width
-      this.committedLines = 0
-      // Rows already in scrollback cannot rewrap; drop them and rebuild at the new width.
-      this.stdout.write(`${ESC}H${ESC}2J${ESC}3J`)
-      this.inlineRows = []
-      this.inlineCursorRow = 1
-    }
-    const room = Math.max(0, Math.min(this.stdout.rows, viewportRows))
-    const bodyRows = Math.max(0, room - 4)
-    const overflow = Math.max(0, body.length - this.committedLines - bodyRows)
-    if (overflow === 0) return []
-    const commit = body.slice(this.committedLines, this.committedLines + overflow)
-    this.committedLines += overflow
-    return commit
+  private pageRows(): number {
+    return Math.max(1, (this.lastFrame?.transcriptRows ?? 11) - 1)
   }
 
   /**
@@ -1738,6 +1688,10 @@ export class TuiApp {
       }
       const point = this.clampSelectionPoint(mouse.column, mouse.row, region.top, bottom)
       this.selection = { anchor: point, head: point, dragging: true }
+      // Pin the view to the rows under the pointer, so streamed output cannot slide the text
+      // out from under a selection in progress.
+      this.positionBeforePress = this.position
+      this.scrollBy(0)
       this.requestRender()
       return
     }
@@ -1750,7 +1704,16 @@ export class TuiApp {
       return
     }
     if (mouse.action === 'up' && mouse.button === 'left' && this.selection?.dragging === true) {
-      this.selection = { ...this.selection, dragging: false }
+      const { anchor, head } = this.selection
+      if (anchor.row === head.row && anchor.column === head.column) {
+        // A plain click selects nothing, so it gives back the view it pinned, as codex's
+        // `resume_on_empty` does: a click while following the latest keeps following.
+        this.selection = undefined
+        this.position = this.positionBeforePress ?? this.position
+      } else {
+        this.selection = { ...this.selection, dragging: false }
+      }
+      this.positionBeforePress = undefined
       this.requestRender()
     }
   }
@@ -1791,22 +1754,13 @@ export class TuiApp {
   private enterTerminal(): () => void {
     this.stdin.setRawMode(true)
     this.stdin.resume()
-    // Inline mode owns only the rows it paints, starting at the cursor: the alternate screen is
-    // left alone so finished history lands in the terminal's own scrollback instead of being
-    // repainted by this app forever.
-    const enter = SCREEN_MODE === 'fullscreen'
-      ? `\u001b[?1049h\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u\u001b[2J\u001b[H`
-      : `\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u`
-    this.stdout.write(enter)
+    this.stdout.write(`\u001b[?1049h\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u\u001b[2J\u001b[H`)
     return () => {
       this.stdin.off('data', this.onData)
       this.stdout.off('resize', this.onResize)
       this.stdin.setRawMode(false)
       this.stdin.pause()
-      const leave = SCREEN_MODE === 'fullscreen'
-        ? `\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[?1049l`
-        : `\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[2K\r\n`
-      this.stdout.write(leave)
+      this.stdout.write(`\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[?1049l`)
     }
   }
 
@@ -2048,6 +2002,8 @@ export function decodeTerminalInput(value: string): Key[] {
         ['\u001b[1;3A', { name: 'up', meta: true }],
         ['\u001b[1;3B', { name: 'down', meta: true }],
         ['\u001b[1;5A', { name: 'up', ctrl: true }],
+        ['\u001b[1;5H', { name: 'home', ctrl: true }],
+        ['\u001b[1;5F', { name: 'end', ctrl: true }],
         ['\u001b[1;5B', { name: 'down', ctrl: true }],
         ['\u001b[H', { name: 'home' }],
         ['\u001b[F', { name: 'end' }],

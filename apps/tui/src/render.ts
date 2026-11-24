@@ -17,13 +17,9 @@ import type {
   TranscriptState,
   ToolStatus,
 } from './transcript.ts'
+import { characterWidth, paintScreen, ScreenBuffer } from './screen.ts'
 
 const ESC = '\u001b['
-/** Stop the terminal wrapping a row that fills its last column, and restore it after. */
-const AUTOWRAP_OFF = '\u001b[?7l'
-const AUTOWRAP_ON = '\u001b[?7h'
-/** Erase from the cursor to the end of the screen, clearing rows below the frame. */
-const ERASE_BELOW = '\u001b[0J'
 const RESET = `${ESC}0m`
 const BOLD = `${ESC}1m`
 const DIM = `${ESC}2m`
@@ -58,27 +54,85 @@ export interface RenderedSelectionRegion {
 
 /** Complete frame and terminal cursor position. */
 export interface RenderedFrame {
+  /** The composed rows with their styling, joined by CRLF: what the frame shows. */
   readonly text: string
+  /** Bytes that bring the terminal from the previous frame to this one, cursor included. */
+  readonly paint: string
   readonly cursorRow: number
   readonly cursorColumn: number
   readonly selectionRegion: RenderedSelectionRegion | undefined
+  /** Rows the transcript area holds this frame; a page scroll moves by one fewer. */
+  readonly transcriptRows: number
+  /** Where this frame's transcript view sits, resolved against what it showed. */
+  readonly position: TranscriptPosition
+  /**
+   * The position `rows` away from this frame's top row, anchored to the content found there.
+   * @param rows - negative toward older content, positive toward the latest.
+   * @returns `LATEST` once the move reaches the bottom, otherwise a reading anchor.
+   */
+  scrollBy(rows: number): TranscriptPosition
 }
 
 /**
- * Rows outside the transcript, menu, dock, and composer.
+ * Where the transcript view sits, as codex's `Position::Latest | Reading(Anchor)`.
  *
- * The header, the blank row above the composer, the blank row below it, and the status row.
- * A frame always carries all four, so they are budgeted once instead of per section.
+ * Latest follows the newest rows. Reading pins the view's top row to content: the transcript
+ * item that row belongs to and how far into that item it is. Rows appended below, a resize
+ * that rewraps every item, or an item above growing all leave the same text at the top, which
+ * a row count from either end cannot do.
  */
-const CHROME_ROWS = 4
+export type TranscriptPosition =
+  | { readonly kind: 'latest' }
+  | {
+    readonly kind: 'reading'
+    /** The item the top row belongs to. */
+    readonly key: string
+    /** Rows into that item. */
+    readonly offset: number
+    /** The item's height when anchored; a rewrapped item scales the offset to its new height. */
+    readonly span: number
+    /** The top row's index when anchored, used once the item itself is gone. */
+    readonly index: number
+  }
+
+/** Follow the newest rows. */
+export const LATEST: TranscriptPosition = { kind: 'latest' }
+
+/** The transcript item, and the row within it, that one transcript row was rendered from. */
+interface RowOwner {
+  readonly key: string
+  readonly offset: number
+}
+
+/** The title row above the conversation. */
+const HEADER_ROWS = 1
+/** The status row, which sits directly under the composer as codex's footer does. */
+const STATUS_ROWS = 1
+/** The blank row between the transcript and the bottom pane. */
+const GAP_ROWS = 1
+/** Most slash suggestions shown at once. */
+const SLASH_MENU_ROWS = 6
+
+/**
+ * Tallest the bottom pane may grow: two thirds of the conversation area, but never under eight
+ * rows, as codex's `composer_height_limit`. The transcript always keeps the rest.
+ * @param area - rows below the header.
+ * @returns the bottom pane's row budget, status row included.
+ */
+export function bottomPaneLimit(area: number): number {
+  return Math.min(area, Math.max(8, Math.floor(area * 2 / 3)))
+}
 
 /** How many rows each section of one frame occupies. */
 interface FrameLayout {
-  readonly body: number
+  readonly header: number
+  readonly transcript: number
+  readonly gap: number
+  /** Slash suggestion rows painted over the bottom of the transcript and the gap. */
   readonly menu: number
-  readonly dock: number
-  readonly composer: number
-  readonly chrome: number
+  /** The queue dock or an open view, then the composer. */
+  readonly bottom: number
+  readonly status: number
   readonly total: number
 }
 
@@ -87,12 +141,7 @@ interface TranscriptRenderCache {
   readonly width: number
   readonly expandedTools: boolean
   readonly lines: string[]
-}
-
-interface ScreenRenderCache {
-  readonly rows: number
-  readonly columns: number
-  readonly lines: readonly string[]
+  readonly owners: RowOwner[]
 }
 
 /** Inputs shared by the renderer and its tests. */
@@ -109,7 +158,9 @@ export interface RenderViewOptions {
   readonly slashLoading?: boolean
   readonly overlay: Overlay | undefined
   readonly expandedTools: boolean
-  readonly scroll: number
+  readonly scroll: TranscriptPosition
+  /** Keep a reading position even at the bottom: a selection is pinned to the rows it covers. */
+  readonly holdPosition?: boolean
   readonly notice: string | undefined
   readonly selection?: TerminalSelection | undefined
 }
@@ -119,10 +170,10 @@ export interface RenderViewOptions {
  * Records whether the frame repainted the whole screen, plus every row whose
  * measured width disagrees with the terminal's column count.
  * @param options - the frame's terminal dimensions and scroll offset.
- * @param incremental - whether the caller asked for a changed-row repaint.
- * @param fullRepaint - whether the frame fell back to a whole-screen clear.
+ * @param incremental - whether the caller asked for a changed-cell repaint.
+ * @param fullRepaint - whether the frame cleared the screen and wrote every cell.
  * @param lines - composed screen rows.
- * @param changedBytes - byte length of the incremental update, or 0 for a full repaint.
+ * @param changedBytes - byte length of the update sent to the terminal.
  */
 function dumpRenderTrace(
   options: RenderViewOptions,
@@ -144,20 +195,20 @@ function dumpRenderTrace(
   const record = [
     `t=${String(Date.now())}`,
     `mode=${incremental ? 'incremental' : 'full'}`,
-    `repaint=${fullRepaint ? 'whole-screen' : 'changed-rows'}`,
+    `repaint=${fullRepaint ? 'whole-screen' : 'changed-cells'}`,
     `cols=${String(columns)}`,
     `rows=${String(rows)}`,
     `lines=${String(lines.length)}`,
-    `scroll=${String(options.scroll)}`,
+    `scroll=${options.scroll.kind === 'latest' ? 'latest' : `${options.scroll.key}+${String(options.scroll.offset)}`}`,
     `bytes=${String(changedBytes)}`,
     `overwide=${wide.length === 0 ? '-' : wide.join(',')}`,
     // The section sizes the frame was composed from: an overlap here is a geometry bug, and
     // a frame that sums to `rows` without one still leaves a desync to the terminal itself.
     layout === undefined
       ? 'layout=-'
-      : `layout=body${String(layout.body)}+menu${String(layout.menu)}+dock${String(layout.dock)}`
-        + `+composer${String(layout.composer)}+chrome${String(layout.chrome)}`
-        + `=${String(layout.total)}/${String(rows)}`,
+      : `layout=header${String(layout.header)}+transcript${String(layout.transcript)}+gap${String(layout.gap)}`
+        + `+bottom${String(layout.bottom)}+status${String(layout.status)}`
+        + `=${String(layout.total)}/${String(rows)} menu${String(layout.menu)}`,
   ].join(' ')
   try {
     appendFileSync(path, `${record}\n`)
@@ -175,166 +226,165 @@ export function renderView(options: RenderViewOptions): RenderedFrame {
   return new TerminalRenderer().render(options)
 }
 
-/** Stateful renderer that reuses transcript wrapping and updates changed rows only. */
+/** Stateful renderer that reuses transcript wrapping and updates changed cells only. */
 export class TerminalRenderer {
   private transcriptCache: TranscriptRenderCache | undefined
-  /** Full transcript at the width of the last frame, for the inline painter's history. */
-  private lastTranscript: readonly string[] | undefined
-  private screenCache: ScreenRenderCache | undefined
+  /** The grid the terminal shows after the last frame, which the next frame is diffed against. */
+  private screen: ScreenBuffer | undefined
+  private screenRows: readonly string[] = []
 
   /**
    * Rows of the most recent frame, without ANSI styling.
-   * Incremental frames write only changed rows, so this is the only complete view.
+   * Incremental frames write only changed cells, so this is the only complete view.
    * @returns screen rows top to bottom, or an empty array before the first frame.
    */
-  /**
-   * Every transcript row at the current width, independent of the terminal height.
-   *
-   * The inline painter commits the rows that have scrolled out of its viewport, so it needs the
-   * whole transcript rather than the window a full-screen frame would show.
-   * @returns transcript rows, oldest first.
-   */
-  transcriptLines(): readonly string[] {
-    return this.lastTranscript ?? []
-  }
-
   screenLines(): readonly string[] {
-    return (this.screenCache?.lines ?? []).map(line => stripAnsi(line))
+    return this.screenRows.map(line => stripAnsi(line))
   }
 
   /**
-   * Render one frame, optionally using changed-row updates instead of clearing the screen.
+   * Render one frame, optionally updating only the cells that changed since the last one.
+   *
+   * The composed rows are written into a grid the size of the terminal, so a row that measures
+   * wider than the terminal is clipped at the margin instead of folding onto the composer, and
+   * rows past the bottom are dropped instead of scrolling the screen.
    * @param options - terminal dimensions, transcript, composer, overlay, and scroll.
-   * @param incremental - retain the previous screen and repaint only changed rows.
-   * @returns frame body plus the absolute terminal cursor.
+   * @param incremental - diff against the previous frame; otherwise clear and redraw everything.
+   * @returns the composed rows, the bytes to paint them, and the absolute terminal cursor.
    */
   render(options: RenderViewOptions, incremental = false): RenderedFrame {
     const frame = this.compose(options)
-    const changed = incremental ? changedRows(this.screenCache, options, frame.lines) : undefined
-    this.screenCache = {
-      rows: Math.max(10, options.rows),
-      columns: Math.max(20, options.columns),
-      lines: frame.lines,
-    }
-    dumpRenderTrace(options, incremental, changed === undefined, frame.lines, changed?.length ?? 0, frame.layout)
-    const body = changed ?? fullRepaint(frame.lines)
-    // Autowrap is off for the paint: a row that measures one cell wider than the terminal
-    // would otherwise wrap at the last column, push every following row down by one, and
-    // leave the framebuffer disagreeing with `screenCache` about which row holds what.
-    // Only a whole-screen paint may erase below itself: an incremental frame stops at its
-    // last changed row, and erasing from there would wipe the rows under it — the composer
-    // and the status line among them.
-    const erase = changed === undefined ? ERASE_BELOW : ''
+    const screen = ScreenBuffer.fromLines(Math.max(1, options.columns), Math.max(1, options.rows), frame.lines)
+    const previous = incremental ? this.screen : undefined
+    const fullRepaint = previous?.width !== screen.width || previous.height !== screen.height
+    const paint = paintScreen(previous, screen, { row: frame.cursorRow, column: frame.cursorColumn })
+    this.screen = screen
+    this.screenRows = frame.lines
+    dumpRenderTrace(options, incremental, fullRepaint, frame.lines, paint.length, frame.layout)
     return {
       ...frame,
-      text: `${AUTOWRAP_OFF}${body}${erase}${AUTOWRAP_ON}`,
+      text: frame.lines.join('\r\n'),
+      paint,
     }
   }
 
-  private compose(options: RenderViewOptions): Omit<RenderedFrame, 'text'> & { readonly lines: string[]; readonly layout: FrameLayout } {
+  /**
+   * Lay out one frame the way codex lays out its conversation.
+   *
+   * The bottom pane is measured first and anchored to the bottom: the queue dock (or an open
+   * view such as an approval, in its place), the composer, then the status row. It may take up
+   * to `bottomPaneLimit` rows; inside it the composer keeps its rows and whatever sits above it
+   * gives up rows first. Unlike codex, a view does not hide the composer, so the draft and its
+   * cursor stay in sight while a view waits for an answer. The transcript
+   * gets everything above it, less one gap row. Slash suggestions are painted over the bottom of
+   * the transcript, so opening or closing the menu never moves the transcript or the composer.
+   * @param options - terminal dimensions and everything the frame shows.
+   * @returns exactly `height` rows, the cursor, and the size of each section.
+   */
+  private compose(options: RenderViewOptions): Omit<RenderedFrame, 'text' | 'paint'> & { readonly lines: string[]; readonly layout: FrameLayout } {
     const width = Math.max(20, options.columns)
     const height = Math.max(10, options.rows)
     const title = options.state.title || messages.unnamedSession
     const runState = options.state.running ? `${YELLOW}${messages.running}${RESET}` : `${GREEN}${messages.idle}${RESET}`
     const header = `${BOLD}${messages.appTitle}${RESET} ${DIM}·${RESET} ${sanitize(title)} ${DIM}·${RESET} ${runState}`
-    const maxComposerRows = Math.max(1, Math.min(10, height - 7))
-    const composer = composerLines(
-      options.input,
-      options.cursor,
-      options.images ?? [],
-      width,
-      maxComposerRows,
+    const area = height - HEADER_ROWS
+    const limit = bottomPaneLimit(area)
+    const paneRows = limit - STATUS_ROWS
+
+    // Bottom pane: the composer first (two border rows around at least one inner row), then
+    // whatever fits above it — an open view, or else the queue dock.
+    const composer = composerLines(options.input, options.cursor, options.images ?? [], width, Math.max(1, paneRows - 2))
+    const above = Math.max(0, paneRows - composer.lines.length)
+    const flexible = options.overlay === undefined
+      ? queueDockLines(options.state.queue, options.submission, width, above)
+      : overlayLines(options.overlay, width, above).slice(0, above)
+    const pane = [...flexible, ...composer.lines]
+    const cursor = { line: flexible.length + composer.cursorLine, column: composer.cursorColumn }
+    const bottomRows = pane.length + STATUS_ROWS
+    const gapRows = area - bottomRows >= GAP_ROWS + 1 ? GAP_ROWS : 0
+    const transcriptRows = Math.max(0, area - bottomRows - gapRows)
+
+    // Transcript: the rows that remain, top-aligned while the conversation is shorter than them.
+    // One column of slack: the transcript is indented after wrapping, and a row that ends exactly
+    // on the last column makes the terminal fold a trailing wide glyph.
+    const { lines: body, owners } = this.cachedTranscriptLines(options, Math.max(8, width - TRANSCRIPT_LEFT_PADDING - 1))
+    const maxTop = Math.max(0, body.length - transcriptRows)
+    const top = resolveTop(options.scroll, owners, maxTop)
+    const position = options.scroll.kind === 'reading' && (top < maxTop || options.holdPosition === true)
+      ? anchorAt(owners, top)
+      : LATEST
+    const scrollBy = (rows: number): TranscriptPosition => {
+      const next = Math.min(maxTop, Math.max(0, top + rows))
+      return next >= maxTop && rows > 0 ? LATEST : anchorAt(owners, next)
+    }
+    const visible = body.slice(top, top + transcriptRows)
+    while (visible.length < transcriptRows) visible.push('')
+    const paddedBody = visible.map(line => fitAnsi(`${' '.repeat(TRANSCRIPT_LEFT_PADDING)}${line}`, width))
+    const selectedBody = highlightSelection(paddedBody, HEADER_ROWS + 1, options.selection, width)
+    const conversation = [...selectedBody, ...Array.from({ length: gapRows }, () => '')]
+    const shown = paddedBody.map(stripAnsi)
+
+    // Slash suggestions cover the rows just above the bottom pane; the highlighted row stays in view.
+    const slashMenu = options.overlay === undefined
+      ? slashMenuLines(options.slashSuggestions ?? [], options.slashSuggestionIndex ?? 0, options.slashLoading === true, width)
+      : []
+    const menuRows = Math.min(slashMenu.length, conversation.length)
+    const menuStart = Math.min(
+      slashMenu.length - menuRows,
+      Math.max(0, (options.slashSuggestionIndex ?? 0) - Math.floor(menuRows / 2)),
     )
-    const slashMenu = slashMenuLines(
-      options.slashSuggestions ?? [],
-      options.slashSuggestionIndex ?? 0,
-      options.slashLoading === true,
-      width,
-    )
-    // The frame must occupy exactly `height` rows. A row count that overshoots scrolls the
-    // terminal, which shifts every row away from the row index an incremental repaint
-    // addresses and paints transcript content over the composer.
-    //
-    // Allocation order is by what the operator can least afford to lose: the composer
-    // (already capped at height - 7), then the slash menu, then the queue dock, then the
-    // transcript. Each later section takes only what is left over.
-    const chromeRows = CHROME_ROWS
-    const visibleComposer = composer.lines.slice(0, Math.max(1, height - chromeRows))
-    const composerRows = visibleComposer.length
-    const slashRows = Math.min(slashMenu.length, Math.max(0, height - chromeRows - composerRows))
-    const dockLimit = Math.max(0, Math.min(6, height - chromeRows - composerRows - slashRows))
-    const dock = queueDockLines(options.state.queue, options.submission, width, dockLimit)
-    const bodyHeight = Math.max(0, height - chromeRows - composerRows - dock.length - slashRows)
-    const transcriptPadding = options.overlay === undefined ? TRANSCRIPT_LEFT_PADDING : 0
-    const body = options.overlay === undefined
-      // One column of slack: the transcript is indented after wrapping, and a row that ends
-      // exactly on the last column makes the terminal fold a trailing wide glyph.
-      ? this.cachedTranscriptLines(options, Math.max(8, width - transcriptPadding - 1))
-      : overlayLines(options.overlay, width, bodyHeight)
-    this.lastTranscript = body
-    const maxScroll = Math.max(0, body.length - bodyHeight)
-    const scroll = Math.min(Math.max(0, options.scroll), maxScroll)
-    const end = Math.max(0, body.length - scroll)
-    const visible = options.overlay === undefined
-      ? body.slice(Math.max(0, end - bodyHeight), end)
-      : body.slice(0, bodyHeight)
-    while (visible.length < bodyHeight) visible.unshift('')
-    const status = statusLine(options.state, width, options.notice, scroll)
-    const paddedBody = visible.map(line => fitAnsi(`${' '.repeat(transcriptPadding)}${line}`, width))
-    const selectedBody = highlightSelection(paddedBody, 2, options.selection, width)
-    // The menu loses rows before the frame can overflow; the highlighted row stays visible.
-    const slashMenuStart = Math.min(
-      slashMenu.length - slashRows,
-      Math.max(0, (options.slashSuggestionIndex ?? 0) - Math.floor(slashRows / 2)),
-    )
-    const visibleSlashMenu = slashMenu.slice(slashMenuStart, slashMenuStart + slashRows)
+    for (const [offset, line] of slashMenu.slice(menuStart, menuStart + menuRows).entries()) {
+      const row = conversation.length - menuRows + offset
+      conversation[row] = fitAnsi(line, width)
+      // A covered transcript row is not on screen, so it cannot be selected either.
+      if (row < shown.length) shown[row] = ''
+    }
+
+    const status = statusLine(options.state, width, options.notice, position.kind === 'reading')
     const lines = [
       fitAnsi(header, width),
-      ...selectedBody,
-      ...visibleSlashMenu.map(line => fitAnsi(line, width)),
-      ...dock.map(line => fitAnsi(line, width)),
-      '',
-      ...visibleComposer.map(line => fitAnsi(line, width)),
-      '',
+      ...conversation,
+      ...pane.map(line => fitAnsi(line, width)),
       fitAnsi(status, width),
     ]
-    const composerStart = 1 + bodyHeight + visibleSlashMenu.length + dock.length + 1
-    const cursorRow = Math.max(1, composerStart + composer.cursorLine + 1)
-    const cursorColumn = Math.min(width - 1, 5 + composer.cursorColumn)
+    const paneTop = HEADER_ROWS + conversation.length
     return {
       lines,
-      cursorRow,
-      cursorColumn,
+      cursorRow: paneTop + cursor.line + 1,
+      cursorColumn: Math.min(width - 1, 5 + cursor.column),
+      transcriptRows,
+      position,
+      scrollBy,
       layout: {
-        body: selectedBody.length,
-        menu: visibleSlashMenu.length,
-        dock: dock.length,
-        composer: visibleComposer.length,
-        chrome: CHROME_ROWS,
+        header: HEADER_ROWS,
+        transcript: transcriptRows,
+        gap: gapRows,
+        menu: menuRows,
+        bottom: pane.length,
+        status: STATUS_ROWS,
         total: lines.length,
       },
-      selectionRegion: options.overlay === undefined
-        ? { top: 2, rows: paddedBody.map(stripAnsi) }
-        : undefined,
+      selectionRegion: { top: HEADER_ROWS + 1, rows: shown },
     }
   }
 
-  private cachedTranscriptLines(options: RenderViewOptions, width: number): string[] {
+  private cachedTranscriptLines(options: RenderViewOptions, width: number): { readonly lines: string[]; readonly owners: RowOwner[] } {
     const cached = this.transcriptCache
     if (cached !== undefined
       && cached.items === options.state.items
       && cached.width === width
       && cached.expandedTools === options.expandedTools) {
-      return cached.lines
+      return cached
     }
-    const lines = transcriptLines(options.state.items, options.expandedTools, width)
+    const { lines, owners } = transcriptLines(options.state.items, options.expandedTools, width)
     this.transcriptCache = {
       items: options.state.items,
       width,
       expandedTools: options.expandedTools,
       lines,
+      owners,
     }
-    return lines
+    return { lines, owners }
   }
 }
 
@@ -437,45 +487,6 @@ function sliceCells(text: string, startColumn: number, endColumn: number): strin
   return result
 }
 
-/**
- * Paint every row at its own position after clearing the screen.
- *
- * Addressing each row instead of separating them with a newline keeps the paint independent
- * of how the terminal expands LF, so a row can never consume two rows or leave the cursor
- * mid-line.
- * @param lines - rows to paint, already fitted to the terminal width.
- * @returns the escape sequence that places all rows.
- */
-function fullRepaint(lines: readonly string[]): string {
-  // Rows stay newline-separated because `screenLines`, the transcript snapshot tests, and the
-  // terminal itself all read the frame as newline-delimited rows. `\r` before each break puts
-  // the cursor at column 1 independently of how the terminal expands LF, and autowrap is off
-  // for the paint, so a full-width row cannot consume two rows.
-  return `${ESC}2J${ESC}H${lines.join('\r\n')}`
-}
-
-
-
-function changedRows(
-  previous: ScreenRenderCache | undefined,
-  options: RenderViewOptions,
-  lines: readonly string[],
-): string | undefined {
-  if (previous === undefined
-    || previous.rows !== Math.max(10, options.rows)
-    || previous.columns !== Math.max(20, options.columns)
-    || previous.lines.length !== lines.length) {
-    return undefined
-  }
-  let result = ''
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    if (line === previous.lines[index]) continue
-    result += `${ESC}${String(index + 1)};1H${ESC}2K${line ?? ''}`
-  }
-  return result
-}
-
 function slashMenuLines(
   suggestions: readonly SlashSuggestion[],
   selected: number,
@@ -483,7 +494,7 @@ function slashMenuLines(
   width: number,
 ): string[] {
   if (suggestions.length === 0) return loading ? [`${DIM}${messages.loadingCommands}${RESET}`] : []
-  const max = 6
+  const max = SLASH_MENU_ROWS
   const start = Math.min(Math.max(0, selected - Math.floor(max / 2)), Math.max(0, suggestions.length - max))
   return suggestions.slice(start, start + max).map((suggestion, offset) => {
     const index = start + offset
@@ -494,8 +505,18 @@ function slashMenuLines(
   })
 }
 
-function transcriptLines(items: readonly TranscriptItem[], expandedTools: boolean, width: number): string[] {
+function transcriptLines(
+  items: readonly TranscriptItem[],
+  expandedTools: boolean,
+  width: number,
+): { readonly lines: string[]; readonly owners: RowOwner[] } {
   const lines: string[] = []
+  const owners: RowOwner[] = []
+  // Every row an item emits, its trailing spacer included, belongs to that item.
+  const claim = (key: string): void => {
+    const start = owners.length
+    for (let row = start; row < lines.length; row += 1) owners.push({ key, offset: row - start })
+  }
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]
     if (item === undefined) continue
@@ -508,6 +529,7 @@ function transcriptLines(items: readonly TranscriptItem[], expandedTools: boolea
       }
       lines.push(...toolGroupLines(group, expandedTools, width))
       lines.push('')
+      claim(item.id)
       continue
     }
     const prefix = itemPrefix(item)
@@ -521,11 +543,13 @@ function transcriptLines(items: readonly TranscriptItem[], expandedTools: boolea
         lines.push(`${USER_BLOCK_STYLE}${padAnsi(`${marker}${line}`, width)}${RESET}`)
       }
       lines.push('', '')
+      claim(item.id)
       continue
     }
     if (item.kind === 'assistant') {
       lines.push(...renderMarkdownLines(item.text, width))
       lines.push('')
+      claim(item.id)
       continue
     }
     const contentWidth = Math.max(8, width - displayWidth(prefix))
@@ -534,8 +558,43 @@ function transcriptLines(items: readonly TranscriptItem[], expandedTools: boolea
     lines.push(`${prefix}${wrapped[0] ?? ''}`)
     for (const line of wrapped.slice(1)) lines.push(`${' '.repeat(displayWidth(prefix))}${line}`)
     lines.push('')
+    claim(item.id)
   }
-  return lines.length === 0 ? [`${DIM}${messages.emptyTranscript}${RESET}`] : lines
+  if (lines.length === 0) return { lines: [`${DIM}${messages.emptyTranscript}${RESET}`], owners: [{ key: '', offset: 0 }] }
+  return { lines, owners }
+}
+
+/**
+ * The top row a position shows.
+ * @param position - where the view sits.
+ * @param owners - the item and in-item row behind each transcript row.
+ * @param maxTop - the top row that shows the newest rows.
+ * @returns a row index in `[0, maxTop]`.
+ */
+function resolveTop(position: TranscriptPosition, owners: readonly RowOwner[], maxTop: number): number {
+  if (position.kind === 'latest') return maxTop
+  const start = owners.findIndex(owner => owner.key === position.key)
+  if (start < 0) return Math.min(maxTop, Math.max(0, position.index))
+  let span = 0
+  while (owners[start + span]?.key === position.key) span += 1
+  // A rewrapped item keeps the same share of itself above the top row.
+  const offset = span === position.span || position.span <= 0
+    ? position.offset
+    : Math.round(position.offset * span / position.span)
+  return Math.min(maxTop, Math.max(0, start + Math.min(span - 1, offset)))
+}
+
+/**
+ * A reading position whose top row is `top`.
+ * @param owners - the item and in-item row behind each transcript row.
+ * @param top - the row to pin to the top of the view.
+ * @returns the anchor for that row.
+ */
+function anchorAt(owners: readonly RowOwner[], top: number): TranscriptPosition {
+  const owner = owners[top] ?? { key: '', offset: 0 }
+  let span = owner.offset + 1
+  while (owners[top - owner.offset + span]?.key === owner.key) span += 1
+  return { kind: 'reading', key: owner.key, offset: owner.offset, span, index: top }
 }
 
 interface InlineStyle {
@@ -1257,7 +1316,7 @@ function statusLine(
   state: TranscriptState,
   width: number,
   notice: string | undefined,
-  scroll: number,
+  reading: boolean,
 ): string {
   const cwd = shortenHome(state.cwd)
   const model = state.model === undefined
@@ -1270,7 +1329,7 @@ function statusLine(
   const cacheReading = cache === undefined ? '' : ` | cache ${String(cache)}%`
   const activeTool = state.items.findLast(item => item.kind === 'tool' && item.toolStatus === 'running')
   const activity = activeTool === undefined ? '' : ` | ${activeTool.title ?? messages.tool} running`
-  const bottom = scroll > 0 ? ' | ↓ bottom · Esc' : ''
+  const bottom = reading ? ' | ↓ bottom · Esc' : ''
   // The run state is one paired reading: showing only the running half made an idle
   // terminal look like a frame that had failed to paint its tail.
   const runState = ` | ${state.running ? messages.running : messages.idle}`
@@ -1656,22 +1715,6 @@ function fitsOneRow(text: string, width: number): boolean {
 
 function displayWidth(text: string): number {
   return Array.from(stripAnsi(text)).reduce((sum, char) => sum + characterWidth(char), 0)
-}
-
-function characterWidth(char: string): number {
-  const code = char.codePointAt(0) ?? 0
-  return code >= 0x1100 && (
-    code <= 0x115f
-    || code === 0x2329 || code === 0x232a
-    || (code >= 0x2e80 && code <= 0xa4cf)
-    || (code >= 0xac00 && code <= 0xd7a3)
-    || (code >= 0xf900 && code <= 0xfaff)
-    || (code >= 0xfe10 && code <= 0xfe19)
-    || (code >= 0xfe30 && code <= 0xfe6f)
-    || (code >= 0xff00 && code <= 0xff60)
-    || (code >= 0xffe0 && code <= 0xffe6)
-    || (code >= 0x1f300 && code <= 0x1faff)
-  ) ? 2 : 1
 }
 
 export function stripAnsi(text: string): string {
