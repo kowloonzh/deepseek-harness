@@ -19,6 +19,8 @@ const KEY = {
   /** Plain Enter is carriage return. */
   enter: '\r',
   tab: '\t',
+  /** Alt+Enter is Escape-prefixed CR in the legacy encoding. */
+  altEnter: '\u001b\r',
   escape: '\u001b',
   /** Ctrl+Enter over the Kitty keyboard protocol. */
   ctrlEnter: '\u001b[13;5u',
@@ -107,7 +109,7 @@ async function expectSentDraftBreaksOut(key: string): Promise<void> {
 }
 
 describe('composer keys', () => {
-  it('queues on Enter, interrupts and sends on Tab, and only interrupts on Escape', async () => {
+  it('queues on Enter, interrupts and sends on Alt+Enter, and only interrupts on Escape', async () => {
     const terminal = await mountTerminal()
     try {
       await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
@@ -124,10 +126,12 @@ describe('composer keys', () => {
       await expect.poll(() => terminal.screen()).not.toContain('| running')
       expect(terminal.screen()).toContain('queued: queued row')
 
-      // Tab against a running turn interrupts it and sends the draft. The replay fixture
-      // carries one turn, so this waits for that same turn to be running again rather than
-      // starting a second one.
-      terminal.input.write('tab sent this')
+      // Alt+Enter sends the draft at once instead of queueing it. The turn above was already
+      // interrupted, which is why this is the plain send half of the gesture.
+      terminal.input.write('alt enter sent this')
+      terminal.input.write(KEY.altEnter)
+      await expect.poll(() => terminal.screen()).not.toContain('queued: alt enter sent this')
+      await expect.poll(() => terminal.screen()).toContain('alt enter sent this')
     } finally {
       await terminal.stop()
     }
