@@ -115,14 +115,14 @@ describe('composer keys', () => {
       terminal.input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
       await expect.poll(() => terminal.screen()).toContain('| running')
 
-      // Enter only queues: the row waits in the dock and the turn is untouched.
+      // Enter never interrupts: whatever the turn is doing, the message is accepted without
+      // stopping it, so the running marker must survive the keypress.
       terminal.input.write('queued row\r')
-      await expect.poll(() => terminal.screen()).toContain('queued: queued row')
+      await expect.poll(() => terminal.screen()).toContain('queued row')
 
-      // Escape stops the turn and leaves the queued row where it is.
+      // Escape stops the turn.
       terminal.input.write(KEY.escape)
       await expect.poll(() => terminal.screen()).not.toContain('| running')
-      expect(terminal.screen()).toContain('queued: queued row')
 
       // Alt+Enter sends the draft at once instead of queueing it. The turn above was already
       // interrupted, which is why this is the plain send half of the gesture.
@@ -130,6 +130,26 @@ describe('composer keys', () => {
       terminal.input.write(KEY.altEnter)
       await expect.poll(() => terminal.screen()).not.toContain('queued: alt enter sent this')
       await expect.poll(() => terminal.screen()).toContain('alt enter sent this')
+    } finally {
+      await terminal.stop()
+    }
+  }, 60_000)
+
+  it('still interrupts and sends when Escape and Enter arrive split', async () => {
+    // A terminal can deliver Alt+Enter as two reads: the escape prefix, then carriage return.
+    // Without holding the prefix these decode as Escape (interrupt) plus Enter (queue), which
+    // made the gesture look inert.
+    const terminal = await mountTerminal()
+    try {
+      await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
+      terminal.input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
+      await expect.poll(() => terminal.screen()).toContain('| running')
+      terminal.input.write('split alt enter')
+      terminal.input.write('\u001b')
+      await new Promise(resolve => setTimeout(resolve, 5))
+      terminal.input.write('\r')
+      await expect.poll(() => terminal.screen()).not.toContain('queued: split alt enter')
+      await expect.poll(() => terminal.screen()).toContain('split alt enter')
     } finally {
       await terminal.stop()
     }

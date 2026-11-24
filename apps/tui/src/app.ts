@@ -89,6 +89,15 @@ const DEFAULT_IMAGE_LIMITS = {
  */
 const QUEUE_MODE = 'queue' as const
 const FINAL_EXIT_GRACE_MS = 3_000
+/** A lone Escape byte, which may be the first half of an Alt-modified key. */
+const ESCAPE_PREFIX = '\u001b'
+/**
+ * How long a lone Escape waits for a partner byte.
+ *
+ * Long enough to span the gap between two reads of one keypress, short enough that a real
+ * Escape still feels immediate.
+ */
+const ESCAPE_PREFIX_WINDOW_MS = 25
 
 function compareSlashSuggestions(
   query: string,
@@ -181,6 +190,9 @@ export class TuiApp {
   private followAbort: AbortController | undefined
   private readonly subscriptions = new Set<Promise<void>>()
   private renderTimer: NodeJS.Timeout | undefined
+  /** A lone Escape byte held until its partner arrives or the window closes. */
+  private pendingEscape = ''
+  private escapeTimer: NodeJS.Timeout | undefined
   private renderMode: 'full' | 'incremental' = 'full'
   private stopped = false
   private ctrlCPending = false
@@ -308,7 +320,24 @@ export class TuiApp {
   }
 
   private readonly onData = (data: Buffer): void => {
-    for (const key of decodeTerminalInput(data.toString())) {
+    const text = this.pendingEscape + data.toString()
+    this.pendingEscape = ''
+    // A terminal sends Alt+Enter as Escape followed by carriage return, and the two can
+    // arrive in separate reads. Held alone that Escape is the interrupt key and the carriage
+    // return is a queued send, so the gesture would look inert; holding the escape for one
+    // short window lets the pair decode as a single key.
+    if (text === ESCAPE_PREFIX) {
+      this.pendingEscape = text
+      this.escapeTimer ??= setTimeout(() => {
+        this.escapeTimer = undefined
+        const held = this.pendingEscape
+        this.pendingEscape = ''
+        if (held === '') return
+        for (const key of decodeTerminalInput(held)) this.onKeypress(key.sequence ?? '', key)
+      }, ESCAPE_PREFIX_WINDOW_MS)
+      return
+    }
+    for (const key of decodeTerminalInput(text)) {
       this.onKeypress(key.sequence ?? '', key)
     }
   }
