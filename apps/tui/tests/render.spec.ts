@@ -562,7 +562,8 @@ describe('terminal rendering', () => {
               id: `q${i}`, placement: 'queued' as const, text: `queued ${i}`, imageCount: 0, fileCount: 0, editable: true,
             }))
             const input = Array.from({ length: inputRows }, (_, i) => `in${i}`).join('\n')
-            const frame = new TerminalRenderer().render({
+            const renderer = new TerminalRenderer()
+            const frame = renderer.render({
               rows, columns: 80, state, input, cursor: input.length,
               overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
               slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
@@ -570,6 +571,14 @@ describe('terminal rendering', () => {
             const painted = frame.text.split('\r\n').length
             if (painted !== rows) offenders.push(`rows=${String(rows)} painted=${String(painted)}`)
             if (!frame.text.includes('\u001b[0J')) offenders.push(`rows=${String(rows)} left rows below the frame`)
+            // An incremental frame stops at its last changed row, so erasing below it would
+            // wipe the composer and status line sitting underneath.
+            const incremental = renderer.render({
+              rows, columns: 80, state, input: `${input}x`, cursor: input.length + 1,
+              overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+              slashSuggestions: suggest(slash), slashSuggestionIndex: 0,
+            }, true)
+            if (incremental.text.includes('\u001b[0J')) offenders.push(`rows=${String(rows)} incremental frame erased below itself`)
             // Autowrap is restored after the erase, or the next frame wraps at the margin.
             if (!frame.text.endsWith('\u001b[?7h')) offenders.push(`rows=${String(rows)} did not restore autowrap`)
           }

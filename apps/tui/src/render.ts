@@ -208,12 +208,13 @@ export class TerminalRenderer {
     // Autowrap is off for the paint: a row that measures one cell wider than the terminal
     // would otherwise wrap at the last column, push every following row down by one, and
     // leave the framebuffer disagreeing with `screenCache` about which row holds what.
+    // Only a whole-screen paint may erase below itself: an incremental frame stops at its
+    // last changed row, and erasing from there would wipe the rows under it — the composer
+    // and the status line among them.
+    const erase = changed === undefined ? ERASE_BELOW : ''
     return {
       ...frame,
-      // `ESC[0J` erases from the cursor to the end of the screen, which clears whatever sits
-      // below the frame when the terminal is taller than the size it reports — content this
-      // renderer never painted and would otherwise leave behind.
-      text: `${AUTOWRAP_OFF}${body}${ERASE_BELOW}${AUTOWRAP_ON}`,
+      text: `${AUTOWRAP_OFF}${body}${erase}${AUTOWRAP_ON}`,
     }
   }
 
