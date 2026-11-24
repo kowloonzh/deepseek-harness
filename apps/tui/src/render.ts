@@ -1170,7 +1170,7 @@ function queueDockLines(
     const kind = item.placement === 'steering' ? 'steer' : 'queued'
     // The hint rides on the message itself so it stays visible however many are pending.
     lines.push(`${DIM}${fit(`${kind}: ${item.text || '[attachment]'}`, width)}${RESET}`)
-    lines.push(`${DIM}${fit('   Alt+Up recall · Ctrl+Enter / Ctrl+X interrupt and send · /queue manage', width)}${RESET}`)
+    lines.push(`${DIM}${fit('   Alt+Up recall · Tab interrupt and send · /queue manage', width)}${RESET}`)
   }
   if (queue.length > budget) {
     lines.push(`${DIM}${fit(`${String(queue.length - budget)} more pending · /queue manage`, width)}${RESET}`)

@@ -557,6 +557,13 @@ export class TuiApp {
       return
     }
     if (key.name === 'tab') {
+      // Tab is a single control byte, so both Ctrl keys and every terminal deliver it.
+      // With a draft against a running turn it is the interrupt-and-send gesture; without
+      // one it still completes, and the slash menu keeps its own handler above.
+      if (this.state.running && this.input.trim() !== '') {
+        void this.submit(true)
+        return
+      }
       this.completeInput()
       return
     }
