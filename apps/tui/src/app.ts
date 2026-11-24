@@ -80,6 +80,19 @@ const DEFAULT_IMAGE_LIMITS = {
   maxMessageImageBytes: 200 * 1024 * 1024,
 } as const
 /** Grace after `stop` for `dispose` to finish before the process exits anyway. */
+/**
+ * Whether the terminal screen is owned by this app.
+ *
+ * Inline mode paints a viewport at the cursor and lets the terminal keep the history it
+ * scrolls past, so finished conversation stays in native scrollback. Fullscreen mode owns the
+ * alternate screen instead. Inline is the default because the composer can only be covered by
+ * rows this app painted, never by rows the terminal scrolled.
+ */
+const SCREEN_MODE = process.env.DSH_TUI_SCREEN === 'fullscreen' ? 'fullscreen' : 'inline'
+
+/** Escape introducer for the inline painter's own cursor and erase sequences. */
+const ESC = '\u001b['
+
 /** Inbox target for a submission that starts its own turn, used where no turn can be running. */
 const QUEUE_MODE = 'queue' as const
 const FINAL_EXIT_GRACE_MS = 3_000
@@ -184,6 +197,13 @@ export class TuiApp {
   private followAbort: AbortController | undefined
   private readonly subscriptions = new Set<Promise<void>>()
   private renderTimer: NodeJS.Timeout | undefined
+  /** Rows of the inline viewport painted last frame, and where its cursor sat. */
+  private inlineRows: readonly string[] = []
+  private inlineCursorRow = 1
+  /** Transcript rows already handed to the terminal scrollback, never repainted. */
+  private committedLines = 0
+  /** Columns the committed history was laid out at; a width change invalidates it. */
+  private committedWidth = 0
   /** A lone Escape byte held until its partner arrives or the window closes. */
   private pendingEscape = ''
   private escapeTimer: NodeJS.Timeout | undefined
@@ -1518,7 +1538,10 @@ export class TuiApp {
   private renderStartup(): void {
     if (this.stopped || this.startupRendered) return
     this.startupRendered = true
-    this.stdout.write(`\u001b[2J\u001b[H${messages.appTitle}\r\n\r\n${messages.starting}`)
+    // The title is printed once above the viewport; inline mode leaves it in the scrollback
+    // when the viewport takes over, and fullscreen mode clears it before the first frame.
+    const prefix = SCREEN_MODE === 'fullscreen' ? '\u001b[2J\u001b[H' : ''
+    this.stdout.write(`${prefix}${messages.appTitle}\r\n${messages.starting}\r\n`)
   }
 
   private render(incremental: boolean): void {
@@ -1542,8 +1565,75 @@ export class TuiApp {
       selection: this.selection,
     }, incremental)
     this.lastFrame = frame
-    this.stdout.write(frame.text)
-    this.stdout.write(`\u001b[${String(frame.cursorRow)};${String(frame.cursorColumn)}H\u001b[?25h`)
+    if (SCREEN_MODE === 'fullscreen') {
+      this.stdout.write(frame.text)
+      this.stdout.write(`\u001b[${String(frame.cursorRow)};${String(frame.cursorColumn)}H\u001b[?25h`)
+      return
+    }
+    this.paintInline(frame)
+  }
+
+  /**
+   * Paint the viewport in place, letting the terminal keep what scrolls past it.
+   *
+   * The frame's rows are the viewport: the transcript tail, the queue dock, the composer, and
+   * the status row. Rows the transcript has outgrown are printed once above the viewport with
+   * a newline, which moves them into the terminal's own scrollback and takes them out of this
+   * app's accounting. Only the composer and the rows above it are rewritten each frame, and
+   * every rewritten row is erased first, so no earlier paint can survive underneath.
+   * @param frame - the composed viewport and the cursor it wants.
+   */
+  private paintInline(frame: RenderedFrame): void {
+    const rows = frame.text.split('\r\n')
+    const lines = rows
+    const commit = this.pendingCommitLines(lines.length)
+    const out: string[] = []
+    // Return to the viewport top from wherever the last frame left the cursor.
+    const up = this.inlineRows.length === 0 ? 0 : Math.min(this.inlineCursorRow - 1, this.inlineRows.length - 1)
+    if (up > 0) out.push(`${ESC}${String(up)}A`)
+    out.push(`${ESC}1G`)
+    // Committed rows are written once and never revisited; the newlines carry them into the
+    // scrollback, which is why this app never has to repaint history.
+    for (const line of commit) out.push(`${ESC}2K${line}\r\n`)
+    for (const [index, line] of lines.entries()) {
+      out.push(`${ESC}2K${line}`)
+      if (index < lines.length - 1) out.push('\r\n')
+    }
+    const down = lines.length - frame.cursorRow
+    if (down > 0) out.push(`${ESC}${String(down)}A`)
+    out.push(`${ESC}${String(Math.max(1, frame.cursorColumn))}G\u001b[?25h`)
+    this.inlineRows = lines
+    this.inlineCursorRow = frame.cursorRow
+    this.stdout.write(out.join(''))
+  }
+
+  /**
+   * Transcript rows that have scrolled out of the viewport and now belong to scrollback.
+   *
+   * A width change invalidates every row already written, because the terminal owns those
+   * rows and cannot rewrap them: the history is cleared and rebuilt from the transcript this
+   * app still holds.
+   * @param viewportRows - rows the viewport will occupy this frame.
+   * @returns rows to print above the viewport, oldest first.
+   */
+  private pendingCommitLines(viewportRows: number): readonly string[] {
+    const width = Math.max(20, this.stdout.columns)
+    const body = this.renderer.transcriptLines()
+    if (width !== this.committedWidth) {
+      this.committedWidth = width
+      this.committedLines = 0
+      // Rows already in scrollback cannot rewrap; drop them and rebuild at the new width.
+      this.stdout.write(`${ESC}H${ESC}2J${ESC}3J`)
+      this.inlineRows = []
+      this.inlineCursorRow = 1
+    }
+    const room = Math.max(0, Math.min(this.stdout.rows, viewportRows))
+    const bodyRows = Math.max(0, room - 4)
+    const overflow = Math.max(0, body.length - this.committedLines - bodyRows)
+    if (overflow === 0) return []
+    const commit = body.slice(this.committedLines, this.committedLines + overflow)
+    this.committedLines += overflow
+    return commit
   }
 
   /**
@@ -1701,13 +1791,22 @@ export class TuiApp {
   private enterTerminal(): () => void {
     this.stdin.setRawMode(true)
     this.stdin.resume()
-    this.stdout.write(`\u001b[?1049h\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u\u001b[2J\u001b[H`)
+    // Inline mode owns only the rows it paints, starting at the cursor: the alternate screen is
+    // left alone so finished history lands in the terminal's own scrollback instead of being
+    // repainted by this app forever.
+    const enter = SCREEN_MODE === 'fullscreen'
+      ? `\u001b[?1049h\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u\u001b[2J\u001b[H`
+      : `\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u`
+    this.stdout.write(enter)
     return () => {
       this.stdin.off('data', this.onData)
       this.stdout.off('resize', this.onResize)
       this.stdin.setRawMode(false)
       this.stdin.pause()
-      this.stdout.write(`\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[?1049l`)
+      const leave = SCREEN_MODE === 'fullscreen'
+        ? `\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[?1049l`
+        : `\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[2K\r\n`
+      this.stdout.write(leave)
     }
   }
 

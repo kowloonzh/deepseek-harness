@@ -178,6 +178,8 @@ export function renderView(options: RenderViewOptions): RenderedFrame {
 /** Stateful renderer that reuses transcript wrapping and updates changed rows only. */
 export class TerminalRenderer {
   private transcriptCache: TranscriptRenderCache | undefined
+  /** Full transcript at the width of the last frame, for the inline painter's history. */
+  private lastTranscript: readonly string[] | undefined
   private screenCache: ScreenRenderCache | undefined
 
   /**
@@ -185,6 +187,17 @@ export class TerminalRenderer {
    * Incremental frames write only changed rows, so this is the only complete view.
    * @returns screen rows top to bottom, or an empty array before the first frame.
    */
+  /**
+   * Every transcript row at the current width, independent of the terminal height.
+   *
+   * The inline painter commits the rows that have scrolled out of its viewport, so it needs the
+   * whole transcript rather than the window a full-screen frame would show.
+   * @returns transcript rows, oldest first.
+   */
+  transcriptLines(): readonly string[] {
+    return this.lastTranscript ?? []
+  }
+
   screenLines(): readonly string[] {
     return (this.screenCache?.lines ?? []).map(line => stripAnsi(line))
   }
@@ -254,8 +267,11 @@ export class TerminalRenderer {
     const bodyHeight = Math.max(0, height - chromeRows - composerRows - dock.length - slashRows)
     const transcriptPadding = options.overlay === undefined ? TRANSCRIPT_LEFT_PADDING : 0
     const body = options.overlay === undefined
-      ? this.cachedTranscriptLines(options, Math.max(8, width - transcriptPadding))
+      // One column of slack: the transcript is indented after wrapping, and a row that ends
+      // exactly on the last column makes the terminal fold a trailing wide glyph.
+      ? this.cachedTranscriptLines(options, Math.max(8, width - transcriptPadding - 1))
       : overlayLines(options.overlay, width, bodyHeight)
+    this.lastTranscript = body
     const maxScroll = Math.max(0, body.length - bodyHeight)
     const scroll = Math.min(Math.max(0, options.scroll), maxScroll)
     const end = Math.max(0, body.length - scroll)
@@ -1515,7 +1531,11 @@ export function wrapText(text: string, width: number): string[] {
     let cells = 0
     for (const char of Array.from(sanitize(paragraph))) {
       const charWidth = characterWidth(char)
-      if (cells + charWidth > width && current !== '') {
+      // A double-width glyph cannot straddle the final column, so the terminal folds it and
+      // the row consumes two rows. Break before it here for the same reason the terminal
+      // would, keeping this row count equal to the one the screen shows.
+      const foldsAtEdge = charWidth === 2 && cells === width - 1
+      if ((cells + charWidth > width || foldsAtEdge) && current !== '') {
         lines.push(current)
         current = ''
         cells = 0
@@ -1583,12 +1603,16 @@ function shortenHome(path: string): string {
 
 function fit(text: string, width: number): string {
   const clean = sanitize(text)
-  if (displayWidth(clean) <= width) return clean
+  if (fitsOneRow(clean, width)) return clean
   let result = ''
   let cells = 0
+  // The ellipsis and the wrapped glyph both need room, so the text stops before a wide glyph
+  // that would otherwise land on the last column and make the terminal fold this row.
+  const limit = width - 1
   for (const char of Array.from(clean)) {
     const charWidth = characterWidth(char)
-    if (cells + charWidth > width - 1) break
+    if (cells + charWidth > limit) break
+    if (charWidth === 2 && cells + charWidth === width - 1) break
     result += char
     cells += charWidth
   }
@@ -1603,8 +1627,31 @@ function fit(text: string, width: number): string {
  * @returns the original text when it fits, else truncated text with every link closed.
  */
 function fitAnsi(text: string, width: number): string {
-  if (displayWidth(stripAnsi(text)) <= width) return text
+  if (fitsOneRow(text, width)) return text
   return `${fit(stripAnsi(text), width)}${OSC}8;;${ST}${RESET}`
+}
+
+/**
+ * Whether the terminal will draw this text on a single row.
+ *
+ * A double-width glyph cannot straddle the last column: when one starts with only one cell
+ * left, the terminal wraps it first and the row occupies two. Measuring the cell sum alone
+ * therefore reports one row where the terminal shows two, and every such disagreement pushes
+ * the rows below it — the composer among them — one line further than the frame budgeted.
+ * @param text - row text, escapes included.
+ * @param width - terminal columns.
+ * @returns true when the row consumes exactly one terminal row.
+ */
+function fitsOneRow(text: string, width: number): boolean {
+  let cells = 0
+  for (const char of Array.from(stripAnsi(text))) {
+    const charWidth = characterWidth(char)
+    // The terminal folds before a wide glyph that cannot fit in the remaining columns.
+    if (charWidth === 2 && cells === width - 1) return false
+    cells += charWidth
+    if (cells > width) return false
+  }
+  return true
 }
 
 function displayWidth(text: string): number {

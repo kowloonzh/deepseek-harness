@@ -587,6 +587,63 @@ describe('terminal rendering', () => {
     }
     expect(offenders).toEqual([])
   })
+
+  it('keeps double-width glyphs off the last column of a row', () => {
+    // A wide glyph cannot straddle the final column: the terminal folds it first, so a row
+    // whose cell sum fits can still occupy two terminal rows — and every row below it, the
+    // composer included, then lands one line lower than the frame budgeted.
+    const offenders: string[] = []
+    const cellWidth = (text: string): number =>
+      Array.from(text).reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1), 0)
+    for (const columns of [20, 21, 40, 41, 80]) {
+      for (const text of ['a中a中a中a中', '中'.repeat(12), '中文中文中文中文中文中文', '1234567中x']) {
+        const state = initialTranscript()
+        state.items = [{ id: 'a', kind: 'assistant', text }]
+        const frame = new TerminalRenderer().render({
+          rows: 20, columns, state, input: '', cursor: 0,
+          overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+        })
+        const rows = stripAnsi(frame.text).split('\n')
+        for (const [index, row] of rows.entries()) {
+          const width = cellWidth(row)
+          if (width > columns) offenders.push(`cols=${String(columns)} row=${String(index + 1)} width=${String(width)}`)
+          // A row that ends exactly on a wide glyph would have been folded by the terminal.
+          if (width === columns && /[\u2e80-\ua4cf\uac00-\ud7a3\uff00-\uff60]$/u.test(row)) {
+            offenders.push(`cols=${String(columns)} row=${String(index + 1)} ends on a wide glyph`)
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  it('keeps a wide glyph off the last column so the terminal never folds a row', () => {
+    // The transcript is indented after wrapping, so a row that ends exactly at the last column
+    // makes the terminal fold a trailing wide glyph. That extra row is invisible to this
+    // renderer but shifts everything below it, which is how transcript rows end up where the
+    // composer should be.
+    const offenders: string[] = []
+    const cellWidth = (text: string): number =>
+      Array.from(text).reduce((sum, char) => sum + ((char.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1), 0)
+    for (const columns of [20, 21, 40, 41, 80]) {
+      for (const text of ['中'.repeat(12), '中文中文中文中文中文中文', 'a中a中a中a中', '1234567中x']) {
+        const state = initialTranscript()
+        state.items = [{ id: 'a', kind: 'assistant', text }]
+        const frame = new TerminalRenderer().render({
+          rows: 20, columns, state, input: '', cursor: 0,
+          overlay: undefined, expandedTools: false, scroll: 0, notice: undefined,
+        })
+        for (const [index, row] of stripAnsi(frame.text).split('\n').entries()) {
+          const width = cellWidth(row)
+          if (width > columns) offenders.push(`cols=${String(columns)} row=${String(index + 1)} wide`)
+          if (width === columns && /[\u2e80-\ua4cf\uac00-\ud7a3\uff00-\uff60]$/u.test(row)) {
+            offenders.push(`cols=${String(columns)} row=${String(index + 1)} ends on a wide glyph`)
+          }
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
 })
 
 function stripAnsi(value: string): string {
