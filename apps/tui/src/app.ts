@@ -80,6 +80,14 @@ const DEFAULT_IMAGE_LIMITS = {
   maxMessageImageBytes: 200 * 1024 * 1024,
 } as const
 /** Grace after `stop` for `dispose` to finish before the process exits anyway. */
+/**
+ * Inbox target every terminal submission uses.
+ *
+ * The terminal only queues: a message waits for the running turn to end, and Ctrl+Enter
+ * interrupts that turn before submitting. Steering — joining a turn mid-flight — is not a
+ * gesture this front end offers, so the mode is a constant rather than a choice.
+ */
+const QUEUE_MODE = 'queue' as const
 const FINAL_EXIT_GRACE_MS = 3_000
 
 function compareSlashSuggestions(
@@ -189,7 +197,7 @@ export class TuiApp {
   private readonly herdr: HerdrReporter
   /** Non-interactive bootstrap requested by `--prompt`; cleared once accepted. */
   private bootstrap: { readonly prompt: string; readonly thenExit: boolean } | undefined
-  /** A `--prompt` submission may be steered or aborted while it is in flight. */
+  /** A `--prompt` submission may be aborted while it is in flight. */
   private bootstrapPending = false
   /** This app was launched by the manager with `--prompt`; its exit is one-shot. */
   private readonly bootstrapRun: boolean
@@ -556,14 +564,14 @@ export class TuiApp {
       if (key.meta) {
         this.insertText('\n')
       } else if (key.ctrl) {
-        void this.submit('queue', true)
+        void this.submit(true)
       } else if (key.shift) {
         this.insertText('\n')
       } else {
-        // Enter always queues. A running turn keeps its own progress, and the queued row is
-        // what Esc promotes into that turn and Alt+Up recalls for editing, so nothing joins
-        // a turn the operator did not explicitly interrupt.
-        void this.submit('queue')
+        // Enter always queues: the row waits for the running turn to end, and Alt+Up recalls
+        // it for editing. Leaving the turn alone is the default, so only Ctrl+Enter joins a
+        // message to a turn that is already running.
+        void this.submit()
       }
       return
     }
@@ -817,7 +825,7 @@ export class TuiApp {
     }
   }
 
-  private async submit(mode: 'queue' | 'steer', interruptFirst = false): Promise<void> {
+  private async submit(interruptFirst = false): Promise<void> {
     const rawText = this.input
     const text = rawText.trim()
     const images = this.draftImages
@@ -857,7 +865,7 @@ export class TuiApp {
       return
     }
     this.submission = {
-      mode,
+      mode: QUEUE_MODE,
       text: text === '' ? localized.imageOnlyPrompt(images.length) : text,
       imageCount: images.length,
     }
@@ -867,7 +875,7 @@ export class TuiApp {
       await this.remote.prompt(
         this.state.sessionId,
         buildPromptContent(rawText, images),
-        mode,
+        QUEUE_MODE,
       )
       this.history.push(text === '' ? localized.imageOnlyPrompt(images.length) : text)
       this.historyIndex = this.history.length
@@ -1033,11 +1041,7 @@ export class TuiApp {
     const images = this.draftImages
     const imageCount = images.length
     if (imageCount > 0) {
-      this.submission = {
-        mode: this.state.running ? 'steer' : 'queue',
-        text: line,
-        imageCount,
-      }
+      this.submission = { mode: 'queue', text: line, imageCount }
       this.requestRender()
     }
     try {
@@ -1096,11 +1100,10 @@ export class TuiApp {
     images: readonly ClipboardImage[] = [],
   ): Promise<void> {
     if (this.state.sessionId === undefined || this.submission !== undefined) return
-    const mode = this.state.running ? 'steer' : 'queue'
-    this.submission = { mode, text, imageCount: images.length }
+    this.submission = { mode: QUEUE_MODE, text, imageCount: images.length }
     this.requestRender()
     try {
-      await this.remote.prompt(this.state.sessionId, buildPromptContent(text, images), mode)
+      await this.remote.prompt(this.state.sessionId, buildPromptContent(text, images), QUEUE_MODE)
       this.history.push(text)
       this.historyIndex = this.history.length
       if (images.length > 0) this.draftImages = []
@@ -1284,7 +1287,7 @@ export class TuiApp {
     if (selected === undefined) return
     this.editor.setText(`/${selected.name}${run ? '' : ' '}`)
     this.slashIndex = 0
-    if (run) void this.submit(this.state.running ? 'steer' : 'queue')
+    if (run) void this.submit()
     else this.requestRender()
   }
 

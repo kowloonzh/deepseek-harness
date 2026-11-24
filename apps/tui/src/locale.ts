@@ -43,7 +43,7 @@ export const messages = {
   queuePicker: 'Pending messages',
   queueQueued: 'queued',
   queueSteering: 'steer',
-  chooseQueue: '↑/↓ choose · Enter steer · e edit · d remove · Esc close',
+  chooseQueue: '↑/↓ choose · e edit · d remove · Esc close',
   emptyTranscript: 'Type a message or /help',
   you: 'You',
   assistant: 'DSH',
