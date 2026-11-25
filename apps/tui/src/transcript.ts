@@ -80,6 +80,8 @@ export interface QueuePrompt {
   readonly imageCount: number
   readonly fileCount: number
   readonly editable: boolean
+  /** A short label the Host gave a message it queued itself, such as a background job's notice. */
+  readonly summary?: string | undefined
 }
 
 /** Host image-admission limits used by the composer before submission. */
@@ -270,6 +272,20 @@ function addProjectedQueue(
     const message = recordValue(candidate)
     if (message === undefined) continue
     const blocks = queueBlocks(message.content)
+    const source = recordValue(message.source)
+    // As the Host's own queue state does: next-step input the operator did not write, such as a
+    // background job's completion notice, is context for the model, not a steer to recall.
+    if (placement === 'steering' && source !== undefined && source.kind !== 'user') {
+      const summary = stringValue(source.summary)
+      target.push({
+        id: stringValue(message.id) ?? `context-${String(index)}`,
+        placement: 'context',
+        ...blocks,
+        editable: false,
+        ...(summary === undefined || summary.trim() === '' ? {} : { summary }),
+      })
+      continue
+    }
     target.push({
       id: stringValue(message.id) ?? `${placement}-${String(index)}`,
       placement,
@@ -283,6 +299,7 @@ function queuePrompt(item: SessionQueuedItem): QueuePrompt {
     id: String(item.id),
     placement: item.placement,
     ...queueBlocks(item.content),
+    ...(item.placement === 'context' ? { editable: false } : {}),
   }
 }
 

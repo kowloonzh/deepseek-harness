@@ -941,6 +941,21 @@ describe('terminal rendering', () => {
     expect(offenders).toEqual([])
   })
 
+  it('shows a Host-queued notice by its summary, without the recall hint', () => {
+    const state = initialTranscript()
+    state.running = true
+    state.queue = [{
+      id: 'n1', placement: 'context', text: 'background job bash-1 finished', imageCount: 0, fileCount: 0, editable: false,
+      summary: 'bash query.sh completed',
+    }]
+    const text = stripAnsi(renderView({
+      rows: 16, columns: 80, state, input: '', cursor: 0, overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
+    }).text)
+    expect(text).toContain('notice: bash query.sh completed')
+    expect(text).not.toContain('steer:')
+    expect(text).not.toContain('Alt+Up recall')
+  })
+
   it('draws a suggestion dim in an empty composer only', () => {
     const options = {
       rows: 12, columns: 60, state: initialTranscript(), cursor: 0, overlay: undefined, expandedTools: false,

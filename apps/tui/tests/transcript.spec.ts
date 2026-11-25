@@ -373,4 +373,29 @@ describe('terminal transcript projection', () => {
     ]) state = applyFollowFrame(state, frame)
     expect(state.items.map(item => item.text)).toEqual(['all good'])
   })
+
+  it('reads a Host-queued notice in the inbox as context, not as a steer', () => {
+    const state = applyControlFrame({ ...initialTranscript(), sessionId }, {
+      type: 'projection', sessionId, seq: 3,
+      changes: [{
+        key: 'inbox',
+        val: {
+          'next-turn': [],
+          'next-step': [
+            { id: 'm1', content: [{ type: 'text', text: 'also check logs' }], source: { kind: 'user' } },
+            {
+              id: 'm2',
+              content: [{ type: 'text', text: 'background job bash-1 (bash: query.sh) finished [status: completed]' }],
+              source: { kind: 'tool-jobs', form: 'notice', summary: 'bash query.sh completed' },
+            },
+          ],
+        },
+      }],
+    } as never)
+    expect(state.queue.map(item => [item.placement, item.editable, item.summary])).toEqual([
+      ['steering', true, undefined],
+      ['context', false, 'bash query.sh completed'],
+    ])
+    expect(steerResend(state.queue)).toMatchObject({ kind: 'send', text: 'also check logs' })
+  })
 })

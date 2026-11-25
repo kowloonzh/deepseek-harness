@@ -40,6 +40,7 @@ export const messages = {
   queuePicker: 'Pending messages',
   queueQueued: 'queued',
   queueSteering: 'steer',
+  queueContext: 'notice',
   chooseQueue: '↑/↓ choose · e edit · d remove · Esc close',
   emptyTranscript: 'Type a message or /help',
   you: 'You',

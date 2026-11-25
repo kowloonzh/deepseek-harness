@@ -1545,6 +1545,11 @@ function queueDockLines(
   }
   const budget = Math.max(0, 3 - lines.length)
   for (const item of queue.slice(0, budget)) {
+    if (item.placement === 'context') {
+      // Host-queued context, such as a finished background job: nothing to recall or manage.
+      lines.push(`${DIM}${fit(`${messages.queueContext}: ${item.summary ?? item.text}`, width)}${RESET}`)
+      continue
+    }
     const kind = item.placement === 'steering' ? 'steer' : 'queued'
     // The hint rides on the message itself so it stays visible however many are pending.
     lines.push(`${DIM}${fit(`${kind}: ${item.text || '[attachment]'}`, width)}${RESET}`)
@@ -1757,7 +1762,9 @@ function queueOverlayLines(
     ...overlay.items.slice(window.start, window.end).map((item, offset) => {
       const index = window.start + offset
       const marker = index === overlay.index ? `${CYAN}>${RESET}` : ' '
-      const type = item.placement === 'steering' ? messages.queueSteering : messages.queueQueued
+      const type = item.placement === 'steering'
+        ? messages.queueSteering
+        : item.placement === 'context' ? messages.queueContext : messages.queueQueued
       const attachment = item.imageCount + item.fileCount === 0
         ? ''
         : ` [${String(item.imageCount + item.fileCount)} attachment]`
