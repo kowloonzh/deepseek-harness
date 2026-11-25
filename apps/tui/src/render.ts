@@ -109,8 +109,15 @@ interface RowOwner {
   readonly offset: number
 }
 
-/** The title row above the conversation. */
-const HEADER_ROWS = 1
+/**
+ * Rows above the conversation: the title, then one blank row that keeps it off the conversation
+ * on a screen tall enough to spare it.
+ * @param height - terminal rows.
+ * @returns 2, or 1 on a short screen.
+ */
+export function headerRows(height: number): number {
+  return height >= 16 ? 2 : 1
+}
 /** The status row, which sits directly under the composer as codex's footer does. */
 const STATUS_ROWS = 1
 /** The blank row between the transcript and the bottom pane. */
@@ -303,7 +310,8 @@ export class TerminalRenderer {
     const title = options.state.title || messages.unnamedSession
     const runState = options.state.running ? `${YELLOW}${messages.running}${RESET}` : `${GREEN}${messages.idle}${RESET}`
     const header = `${BOLD}${messages.appTitle}${RESET} ${DIM}·${RESET} ${sanitize(title)} ${DIM}·${RESET} ${runState}`
-    const area = height - HEADER_ROWS
+    const headerHeight = headerRows(height)
+    const area = height - headerHeight
     const limit = bottomPaneLimit(area)
     const paneRows = limit - STATUS_ROWS
 
@@ -346,7 +354,7 @@ export class TerminalRenderer {
     const visible = body.slice(top, top + transcriptRows)
     while (visible.length < transcriptRows) visible.push('')
     const paddedBody = visible.map(line => fitAnsi(`${' '.repeat(TRANSCRIPT_LEFT_PADDING)}${line}`, width))
-    const selectedBody = highlightSelection(paddedBody, HEADER_ROWS + 1, options.selection, width)
+    const selectedBody = highlightSelection(paddedBody, headerHeight + 1, options.selection, width)
     const conversation = [...selectedBody, ...Array.from({ length: gapRows }, () => '')]
     const shown = paddedBody.map(stripAnsi)
 
@@ -369,11 +377,12 @@ export class TerminalRenderer {
     const status = statusLine(options.state, width, options.notice, position.kind === 'reading', options.quota ?? [], options.now ?? Date.now())
     const lines = [
       fitAnsi(header, width),
+      ...Array.from({ length: headerHeight - 1 }, () => ''),
       ...conversation,
       ...pane.map(line => fitAnsi(line, width)),
       fitAnsi(status, width),
     ]
-    const paneTop = HEADER_ROWS + conversation.length
+    const paneTop = headerHeight + conversation.length
     return {
       lines,
       cursorRow: paneTop + cursor.line + 1,
@@ -382,7 +391,7 @@ export class TerminalRenderer {
       position,
       scrollBy,
       layout: {
-        header: HEADER_ROWS,
+        header: headerHeight,
         transcript: transcriptRows,
         gap: gapRows,
         menu: menuRows,
@@ -390,7 +399,7 @@ export class TerminalRenderer {
         status: STATUS_ROWS,
         total: lines.length,
       },
-      selectionRegion: { top: HEADER_ROWS + 1, rows: shown },
+      selectionRegion: { top: headerHeight + 1, rows: shown },
     }
   }
 

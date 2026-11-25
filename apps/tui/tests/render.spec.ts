@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   bottomPaneLimit,
+  headerRows,
   cacheHitPercent,
   LATEST,
   renderMarkdownLines,
@@ -753,7 +754,7 @@ describe('terminal rendering', () => {
             overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
           })
           const lines = stripAnsi(frame.text).split('\n')
-          const area = rows - 1
+          const area = rows - headerRows(rows)
           const top = lines.findIndex(line => line.startsWith('╭'))
           // Everything from the first dock row (or the composer) to the status row.
           const paneTop = lines.findIndex(line => /^(?:queued|   Alt\+Up|\d+ more pending|╭)/u.test(line))
