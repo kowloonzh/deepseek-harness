@@ -35,6 +35,12 @@ interface Grammar {
   readonly quotes: string
   /** Whether `$name` and `@name` belong to the identifier (shell variables, decorators). */
   readonly sigils?: boolean
+  /**
+   * The cautious mode for fences of unknown content (command output, trees, prose): a comment
+   * marker counts only at the start of a line or after a space, and a string that does not close
+   * on its line stays plain, so `don't` or `issue#12` never recolor the rest of a row.
+   */
+  readonly cautious?: boolean
 }
 
 const words = (text: string): ReadonlySet<string> => new Set(text.split(/\s+/u).filter(word => word !== ''))
@@ -128,6 +134,53 @@ const GRAMMARS: Record<string, Grammar> = {
   },
 }
 
+/** Unlabeled fences whose language cannot be guessed: common keywords, strings, and numbers. */
+const GENERIC: Grammar = {
+  keywords: words(`if else elif for while do return function func fn def class struct interface import from export const
+    let var type package use pub async await try catch except finally throw raise new switch case break continue`),
+  literals: words('true false null nil None True False undefined'),
+  lineComments: ['//', '#'],
+  blockComment: ['/*', '*/'],
+  quotes: '"`',
+  cautious: true,
+}
+
+/**
+ * Guess the language of an unlabeled fence from telltale lines, most specific first.
+ * @param code - the fence's body.
+ * @returns a language tag the highlighter knows, or undefined.
+ */
+export function guessLanguage(code: string): string | undefined {
+  const text = code.trim()
+  if (text === '') return undefined
+  const has = (pattern: RegExp): boolean => pattern.test(text)
+  if (has(/^(?:diff --git |@@ -\d)/mu) || (has(/^--- \S/mu) && has(/^\+\+\+ \S/mu))) return 'diff'
+  if (/^[[{]/u.test(text)) {
+    try {
+      JSON.parse(text)
+      return 'json'
+    } catch {
+      // Not JSON; a brace-led fence is still worth the other checks.
+    }
+  }
+  if (has(/^#!.*\b(?:ba|z)?sh\b/u)) return 'bash'
+  if (has(/^package \w+$/mu) || (has(/^func /mu) && has(/:=/u))) return 'go'
+  if (has(/^\s*(?:pub )?fn \w+.*(?:->|\{)/mu) || has(/\blet mut\b|^use \w+::/mu)) return 'rust'
+  if (has(/^\s*(?:def|class) \w+.*:\s*$/mu) || has(/^from [\w.]+ import /mu) || has(/^import \w+(?:\.\w+)*$/mu)) return 'python'
+  if (has(/^#include\s*[<"]/mu)) return 'c'
+  if (has(/^\s*(?:public|private) (?:static |final )*(?:class|void|interface)\b/mu)) return 'java'
+  if (has(/^\s*(?:SELECT|INSERT INTO|UPDATE|DELETE FROM|CREATE (?:TABLE|INDEX)|ALTER TABLE|WITH)\b/imu) && has(/\b(?:FROM|INTO|SET|TABLE|WHERE|AS)\b/iu)) return 'sql'
+  if (has(/^\s*(?:import .* from |export (?:default |const |function |interface |type )|(?:const|let) \w+ = |interface \w+ \{|function \w*\()/mu) || has(/\) => \{?/u)) return 'typescript'
+  const lines = text.split('\n')
+  const commands = `cd ls git npm pnpm npx yarn node curl wget kubectl helm docker make go cargo python python3 pip pip3 echo
+    export sudo cat grep rg sed awk mkdir rm cp mv chmod ssh tar brew apt apt-get`.split(/\s+/u).filter(word => word !== '')
+  const commandLine = new RegExp(`^\\s*(?:\\$ )?(?:${commands.join('|')})(?:\\s|$)`, 'u')
+  if (lines.filter(line => commandLine.test(line)).length * 2 >= lines.length) return 'bash'
+  const yamlLine = /^\s*(?:- )?[\w.-]+:(?:\s|$)|^\s*- \S|^\s*#/u
+  if (lines.length >= 2 && !has(/[;{}]/u) && lines.every(line => line.trim() === '' || yamlLine.test(line))) return 'yaml'
+  return undefined
+}
+
 const ALIASES: Record<string, string> = {
   ts: 'typescript', tsx: 'typescript', typescript: 'typescript', js: 'typescript', jsx: 'typescript',
   javascript: 'typescript', mjs: 'typescript', cjs: 'typescript',
@@ -151,10 +204,13 @@ const ALIASES: Record<string, string> = {
  */
 export function highlightCode(code: string, language: string | undefined): HighlightSpan[][] {
   const lines = code.split('\n')
-  const tag = (language ?? '').trim().split(/\s+/u)[0]?.toLowerCase() ?? ''
+  const labeled = (language ?? '').trim().split(/\s+/u)[0]?.toLowerCase() ?? ''
+  // An unlabeled fence gets a guessed language, else the cautious generic style; a labeled
+  // one the highlighter does not know stays plain rather than being colored by a wrong guess.
+  const tag = labeled === '' ? guessLanguage(code) ?? '' : labeled
   if (tag === 'diff' || tag === 'patch') return lines.map(diffLine)
   const name = ALIASES[tag]
-  const grammar = name === undefined ? undefined : GRAMMARS[name]
+  const grammar = name === undefined ? labeled === '' ? GENERIC : undefined : GRAMMARS[name]
   if (grammar === undefined) return lines.map(line => [{ text: line, style: '' }])
   const state: ScanState = { blockComment: false, quote: undefined }
   return lines.map(line => scanLine(line, grammar, state))
@@ -200,13 +256,19 @@ function scanLine(line: string, grammar: Grammar, state: ScanState): HighlightSp
   }
   while (index < line.length) {
     const rest = line.slice(index)
-    const lineComment = grammar.lineComments.find(marker => rest.startsWith(marker))
+    const commentAllowed = grammar.cautious !== true || index === 0 || /\s/u.test(line[index - 1] ?? '')
+    const lineComment = commentAllowed ? grammar.lineComments.find(marker => rest.startsWith(marker)) : undefined
     if (lineComment !== undefined) {
       push(rest, STYLE.comment)
       break
     }
-    if (grammar.blockComment !== undefined && rest.startsWith(grammar.blockComment[0])) {
+    if (commentAllowed && grammar.blockComment !== undefined && rest.startsWith(grammar.blockComment[0])) {
       const close = line.indexOf(grammar.blockComment[1], index + grammar.blockComment[0].length)
+      if (close < 0 && grammar.cautious === true) {
+        push(line[index] ?? '', '')
+        index += 1
+        continue
+      }
       if (close < 0) {
         push(rest, STYLE.comment)
         state.blockComment = true
@@ -222,6 +284,11 @@ function scanLine(line: string, grammar: Grammar, state: ScanState): HighlightSp
       // Python's triple quotes and template literals may span lines; other strings end here.
       const quote = rest.startsWith(char.repeat(3)) && char !== '`' ? char.repeat(3) : char
       const end = closingQuote(line, index + quote.length, quote)
+      if (end < 0 && grammar.cautious === true) {
+        push(char, '')
+        index += 1
+        continue
+      }
       if (end < 0) {
         push(rest, STYLE.string)
         if (quote.length === 3 || quote === '`') state.quote = quote
@@ -232,7 +299,7 @@ function scanLine(line: string, grammar: Grammar, state: ScanState): HighlightSp
       continue
     }
     const number = /^(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?)n?/u.exec(rest)
-    if (number !== null && !/[\w$]/u.test(line[index - 1] ?? '')) {
+    if (number !== null && !/[\w$#]/u.test(line[index - 1] ?? '')) {
       push(number[0], STYLE.number)
       index += number[0].length
       continue

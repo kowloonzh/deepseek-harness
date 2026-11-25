@@ -44,6 +44,7 @@ export const messages = {
   you: 'You',
   assistant: 'DSH',
   working: 'Working',
+  readingHint: '↓ bottom · Esc',
   workedFor: (elapsed: string): string => `Worked for ${elapsed}`,
   idle: 'idle',
   running: 'running',

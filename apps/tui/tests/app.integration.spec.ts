@@ -91,7 +91,7 @@ describe('terminal prompt lifecycle', () => {
         .toContain('sending queue: Reply with a one-sentence description')
       await settled
       // The status row marks a running turn and drops the marker when the turn settles.
-      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).not.toContain('| running')
+      await expect.poll(() => (app?.screenLines() ?? []).join('\n')).not.toContain('· running')
       await painted
       expect(terminal.text()).toContain('Event sourcing')
       expect(terminal.text()).toMatch(/event.sourc/iu)
@@ -172,7 +172,7 @@ describe('terminal prompt lifecycle', () => {
     try {
       await expect.poll(() => text).toContain('deepseek-v4-flash')
       input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
-      await expect.poll(frame).toContain('| running')
+      await expect.poll(frame).toContain('· running')
       // Enter hands the message to the running turn, which restates it as steering.
       input.write('queued follow-up\r')
       await expect.poll(frame).toContain('steer: queued follow-up')
@@ -185,7 +185,7 @@ describe('terminal prompt lifecycle', () => {
       await expect.poll(frame).toContain('steer: queued follow-up')
       // Escape only stops the turn.
       input.write('\u001b')
-      await expect.poll(frame).not.toContain('| running')
+      await expect.poll(frame).not.toContain('· running')
       input.write('/queue\r')
       await expect.poll(frame).toContain('Pending messages')
       input.write('d')

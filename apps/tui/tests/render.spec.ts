@@ -13,6 +13,7 @@ import {
   type TranscriptPosition,
   wrapText,
 } from '../src/render.ts'
+import { guessLanguage } from '../src/highlight.ts'
 import { EmulatedTerminal } from './terminal.ts'
 import { initialTranscript } from '../src/transcript.ts'
 import type { SlashSuggestion } from '../src/ui.ts'
@@ -31,8 +32,8 @@ const suggest = (count: number): SlashSuggestion[] =>
   Array.from({ length: count }, (_, i) => ({ name: `cmd${i}`, description: 'd', source: 'command' }))
 
 describe('terminal rendering', () => {
-  it('colors fenced code by its language and leaves unknown fences plain', () => {
-    const lines = renderMarkdownLines('```ts\nconst a = "x" // note\n```\n\n```\nconst b\n```', 60)
+  it('colors fenced code by its language and leaves unknown labels plain', () => {
+    const lines = renderMarkdownLines('```ts\nconst a = "x" // note\n```\n\n```brainfuck\nconst b\n```', 60)
     const code = lines.find(line => stripAnsi(line).includes('const a')) ?? ''
     expect(stripAnsi(code)).toBe('  const a = "x" // note')
     expect(code).toContain('\u001b[35mconst')
@@ -40,6 +41,23 @@ describe('terminal rendering', () => {
     expect(code).toContain('\u001b[2m// note')
     const plain = lines.find(line => stripAnsi(line).includes('const b')) ?? ''
     expect(plain).toBe('  const b')
+  })
+
+  it('guesses an unlabeled fence, else colors it cautiously', () => {
+    expect(guessLanguage('package main\n\nfunc main() {}')).toBe('go')
+    expect(guessLanguage('def f(x):\n    return x')).toBe('python')
+    expect(guessLanguage('{"a": [1, true]}')).toBe('json')
+    expect(guessLanguage('git status\nnpm test')).toBe('bash')
+    expect(guessLanguage('import { a } from "b"\nconst c = a()')).toBe('typescript')
+    expect(guessLanguage('SELECT id FROM users WHERE id = 1')).toBe('sql')
+    expect(guessLanguage('name: dsh\nitems:\n  - one')).toBe('yaml')
+    expect(guessLanguage('just some words')).toBeUndefined()
+    const go = renderMarkdownLines('```\npackage main\n```', 40).join('\n')
+    expect(go).toContain('\u001b[35mpackage')
+    // Output and prose: an apostrophe, a mid-word `#`, or an open `/*` recolor nothing after it.
+    const prose = renderMarkdownLines("```\ndon't stop at issue#12 in /usr/* please\n```", 60)
+    const row = prose.find(line => stripAnsi(line).includes('please')) ?? ''
+    expect(row).toBe("  don't stop at issue#12 in /usr/* please")
   })
 
   it('separates a finished turn that used tools with a Worked for row, and keeps tools off the status row', () => {
@@ -146,7 +164,7 @@ describe('terminal rendering', () => {
     expect(bottom - top).toBeGreaterThanOrEqual(4)
     // Idle is no longer a permanent marker; the status row still owns the last line.
     expect(lines.at(-1)).toContain('~')
-    expect(lines.at(-1)).toContain('|')
+    expect(lines.at(-1)).toContain(' · ')
     expect(lines[top + 1]).toContain('[Image #1] shot.png')
     expect(lines[top + 2]).toContain('next line')
     expect(frame.cursorRow).toBe(top + 4)
@@ -196,7 +214,7 @@ describe('terminal rendering', () => {
     expect(frame.text).toContain('queued: later')
     expect(frame.text).toContain('steer: adjust course')
     const status = stripAnsi(frame.text).split('\n').at(-1) ?? ''
-    expect(status).toContain('model-x:high')
+    expect(status).toContain('model-x high · ')
     expect(status).toContain('ctx 50%')
     // The permission mode moved to `/status`; cache share took its place on the row.
     expect(status).not.toContain('workspace-write')

@@ -1540,41 +1540,69 @@ function statusLine(
   notice: string | undefined,
   reading: boolean,
 ): string {
-  const cwd = shortenHome(state.cwd)
   const model = state.model === undefined
     ? messages.defaultModel
-    : `${state.model.model}${state.model.reasoningEffort === undefined ? '' : `:${state.model.reasoningEffort}`}`
+    : `${state.model.model}${state.model.reasoningEffort === undefined ? '' : ` ${state.model.reasoningEffort}`}`
   const context = contextPercent(state)
-  // Token totals, the permission mode, and the idle flag live in `/status`: they change
-  // slowly, and keeping them here crowded out the two readings that move during work.
   const cache = cacheHitPercent(state.tokens)
-  const cacheReading = cache === undefined ? '' : ` | cache ${String(cache)}%`
-  // The running tool shows in its own card and the status indicator; repeating it here only
-  // crowded the row.
-  const bottom = reading ? ' | ↓ bottom · Esc' : ''
-  // The run state is one paired reading: showing only the running half made an idle
-  // terminal look like a frame that had failed to paint its tail.
-  const runState = ` | ${state.running ? messages.running : messages.idle}`
-  const base = `${cwd} | ${model}${context}${cacheReading}${runState}${bottom}`
-  if (bottom !== '' && (notice === undefined || notice === '')) {
-    const tail = bottom
-    const head = `${cwd} | ${model}${context}${cacheReading}`
-    return `${DIM}${fit(head, Math.max(1, width - displayWidth(tail)))}${tail}${RESET}`
-  }
-  if (notice === undefined || notice === '') return `${DIM}${fit(base, width)}${RESET}`
+  // codex's footer status line: segments joined by a dim ` · `, each in its accent color (model
+  // and state cyan, path and usage green). Token totals and the permission mode live in
+  // `/status`; the running tool already has its own card and the status indicator.
+  const segments: StatusSegment[] = [
+    { text: model, style: CYAN },
+    { text: shortenHome(state.cwd), style: GREEN, shrinks: true },
+    ...(context === undefined ? [] : [{ text: context, style: GREEN }]),
+    ...(cache === undefined ? [] : [{ text: `cache ${String(cache)}%`, style: GREEN }]),
+    // The run state is one paired reading: showing only the running half made an idle
+    // terminal look like a frame that had failed to paint its tail.
+    { text: state.running ? messages.running : messages.idle, style: state.running ? CYAN : DIM },
+    ...(reading ? [{ text: messages.readingHint, style: DIM }] : []),
+  ]
+  if (notice === undefined || notice === '') return statusSegments(segments, width)
   const noticeWidth = displayWidth(notice)
   if (noticeWidth >= width) return `${YELLOW}${fit(notice, width)}${RESET}`
-  const statusWidth = Math.max(1, width - noticeWidth - 2)
-  return `${DIM}${fit(base, statusWidth)}${RESET}  ${YELLOW}${fit(notice, noticeWidth)}${RESET}`
+  return `${statusSegments(segments, Math.max(1, width - noticeWidth - 2))}  ${YELLOW}${fit(notice, noticeWidth)}${RESET}`
 }
 
-function contextPercent(state: TranscriptState): string {
+interface StatusSegment {
+  readonly text: string
+  readonly style: string
+  /** Gives up its width first when the row is too narrow (the working directory). */
+  readonly shrinks?: boolean
+}
+
+const STATUS_SEPARATOR = ' · '
+
+/**
+ * Paint status segments into one row, shortening the shrinkable one before anything else so the
+ * run state and the reading hint at the end stay visible.
+ * @param segments - the readings, left to right.
+ * @param width - columns available.
+ * @returns the styled row.
+ */
+function statusSegments(segments: readonly StatusSegment[], width: number): string {
+  let kept = segments.map(segment => ({ ...segment, text: sanitize(segment.text) }))
+  const total = (): number => displayWidth(kept.map(segment => segment.text).join(STATUS_SEPARATOR))
+  const overflow = total() - width
+  const shrinkable = kept.findIndex(segment => segment.shrinks === true)
+  const target = kept[shrinkable]
+  if (overflow > 0 && target !== undefined) {
+    const room = displayWidth(target.text) - overflow
+    kept = room >= 4
+      ? kept.map((segment, index) => index === shrinkable ? { ...segment, text: fit(segment.text, room) } : segment)
+      : kept.filter((_, index) => index !== shrinkable)
+  }
+  if (total() > width) return `${DIM}${fit(kept.map(segment => segment.text).join(STATUS_SEPARATOR), width)}${RESET}`
+  return kept.map(segment => `${segment.style}${segment.text}${RESET}`).join(`${DIM}${STATUS_SEPARATOR}${RESET}`)
+}
+
+function contextPercent(state: TranscriptState): string | undefined {
   const context = state.context
-  if (context?.contextWindow === undefined) return ''
+  if (context?.contextWindow === undefined) return undefined
   const used = context.projectedTokens ?? context.pressureTokens
-  if (used === undefined) return ''
+  if (used === undefined) return undefined
   const percent = Math.min(100, Math.round(used / context.contextWindow * 100))
-  return ` | ctx ${String(percent)}%`
+  return `ctx ${String(percent)}%`
 }
 
 function composerLines(

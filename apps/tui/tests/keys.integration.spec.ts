@@ -94,7 +94,7 @@ async function expectSentDraftBreaksOut(key: string): Promise<void> {
   try {
     await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
     terminal.input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
-    await expect.poll(() => terminal.screen()).toContain('| running')
+    await expect.poll(() => terminal.screen()).toContain('· running')
     terminal.input.write('sent at once')
     terminal.input.write(key)
     await expect.poll(() => terminal.screen()).not.toContain('queued: sent at once')
@@ -111,7 +111,7 @@ describe('composer keys', () => {
       await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
       // Start a turn and keep it running while the assertions press keys.
       terminal.input.write('Reply with a one-sentence description of event sourcing, then stop.\r')
-      await expect.poll(() => terminal.screen()).toContain('| running')
+      await expect.poll(() => terminal.screen()).toContain('· running')
 
       // Enter never interrupts: whatever the turn is doing, the message is accepted without
       // stopping it, so the running marker must survive the keypress.
@@ -120,7 +120,7 @@ describe('composer keys', () => {
 
       // Escape stops the turn.
       terminal.input.write(KEY.escape)
-      await expect.poll(() => terminal.screen()).not.toContain('| running')
+      await expect.poll(() => terminal.screen()).not.toContain('· running')
 
     } finally {
       await terminal.stop()
