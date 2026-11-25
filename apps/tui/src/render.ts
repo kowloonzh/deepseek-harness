@@ -11,7 +11,7 @@ import type {
   SlashSuggestion,
 } from './ui.ts'
 import type { ClipboardImage } from './clipboard.ts'
-import { highlightCode } from './highlight.ts'
+import { highlightCode, highlightCommand } from './highlight.ts'
 import { messages } from './locale.ts'
 import type {
   TranscriptItem,
@@ -879,7 +879,7 @@ function inlineStyleSequence(style: InlineStyle): string {
   return codes.length === 0 ? '' : `${ESC}${codes.join(';')}m`
 }
 
-function wrapStyled(chars: readonly StyledChar[], width: number): string[] {
+function wrapStyled(chars: readonly StyledChar[], width: number, firstWidth = width): string[] {
   const lines: StyledChar[][] = []
   let line: StyledChar[] = []
   let cells = 0
@@ -894,7 +894,7 @@ function wrapStyled(chars: readonly StyledChar[], width: number): string[] {
       continue
     }
     const charWidth = characterWidth(char.char)
-    if (cells + charWidth > width && line.length > 0) flush()
+    if (cells + charWidth > (lines.length === 0 ? firstWidth : width) && line.length > 0) flush()
     line.push(char)
     cells += charWidth
   }
@@ -1165,7 +1165,9 @@ function toolStatusOf(item: TranscriptItem): ToolStatus {
  */
 function cardBullet(status: ToolStatus, done = GREEN): string {
   const color = status === 'running' ? YELLOW : status === 'error' ? RED : done
-  return `${color}•${RESET} `
+  // codex draws a finished call's bullet bold green or red; a dimmed one stays plain dim.
+  const weight = status !== 'running' && color !== DIM ? BOLD : ''
+  return `${weight}${color}•${RESET} `
 }
 
 /**
@@ -1299,6 +1301,16 @@ function toolCard(item: TranscriptItem, name: string, expanded: boolean, width: 
     return [`${cardBullet(status, DIM)}${BOLD}Updated Plan${RESET}`, ...hang(failure.length > 0 ? failure : rows)]
   }
   const [verb, subject] = callTitle(item, name, status)
+  if (verb === 'Called' || verb === 'Calling') {
+    // codex's tool invocation: the tool in the accent color, its arguments dimmed.
+    const detail = subject.startsWith(name) ? subject.slice(name.length).trimStart() : subject
+    const title = `${cardBullet(status, DIM)}${BOLD}${verb}${RESET} ${CYAN}${name}${RESET}`
+    const lead = displayWidth(verb) + displayWidth(name) + 4
+    const chars: StyledChar[] = Array.from(sanitize(detail), char => ({ char, style: DIM }))
+    const detailRows = detail === '' ? [] : wrapStyled(chars, Math.max(1, width - 2), Math.max(1, width - lead))
+    const head = detailRows.length === 0 ? [title] : [`${title} ${detailRows[0] ?? ''}`, ...detailRows.slice(1).map(row => `  ${row}`)]
+    return [...head, ...hang(failure.length > 0 ? failure : outputRows(output, expanded, inner))]
+  }
   const preview = failure.length > 0
     ? failure
     : expanded || !['web_search', 'web_fetch', 'skill'].includes(name)
@@ -1320,8 +1332,15 @@ function callTitle(item: TranscriptItem, name: string, status: ToolStatus): [str
 function commandCard(item: TranscriptItem, status: ToolStatus, expanded: boolean, width: number): string[] {
   const verb = status === 'running' ? 'Running' : 'Ran'
   const command = commandSubject(item)
-  const rows = command.split(/\r?\n/u).flatMap((line, index) =>
-    wrapText(line, Math.max(1, width - (index === 0 ? displayWidth(verb) + 3 : 4))))
+  // Highlighted per logical line, then wrapped: the first row sits after `• Ran `, the rest
+  // after the four-column `  │ ` gutter.
+  const rows = command.split(/\r?\n/u).flatMap((line, index) => {
+    const chars: StyledChar[] = []
+    for (const span of highlightCommand(line.replaceAll('\t', '    '))) {
+      for (const char of Array.from(sanitize(span.text))) chars.push({ char, style: span.style })
+    }
+    return wrapStyled(chars, Math.max(1, width - 4), index === 0 ? Math.max(1, width - displayWidth(verb) - 3) : undefined)
+  })
   const lines = [`${cardBullet(status)}${BOLD}${verb}${RESET} ${rows[0] ?? ''}`]
   const continuation = rows.slice(1)
   const shown = expanded ? continuation : continuation.slice(0, COMMAND_CONTINUATION_ROWS)

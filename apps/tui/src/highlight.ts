@@ -19,6 +19,7 @@ const STYLE = {
   added: `${ESC}32m`,
   removed: `${ESC}31m`,
   hunk: `${ESC}36m`,
+  command: `${ESC}34m`,
 } as const
 
 /** One run of source text and the SGR style it paints with ('' for plain). */
@@ -233,12 +234,7 @@ interface ScanState {
 
 function scanLine(line: string, grammar: Grammar, state: ScanState): HighlightSpan[] {
   const spans: HighlightSpan[] = []
-  const push = (text: string, style: string): void => {
-    if (text === '') return
-    const last = spans.at(-1)
-    if (last !== undefined && last.style === style) spans[spans.length - 1] = { text: last.text + text, style }
-    else spans.push({ text, style })
-  }
+  const push = spanPusher(spans)
   let index = 0
   if (state.blockComment && grammar.blockComment !== undefined) {
     const end = line.indexOf(grammar.blockComment[1])
@@ -331,4 +327,84 @@ function closingQuote(line: string, from: number, quote: string): number {
     if (line.startsWith(quote, index)) return index + quote.length
   }
   return -1
+}
+
+const SHELL_KEYWORDS = GRAMMARS.shell?.keywords ?? new Set<string>()
+// Longest first, so `&&` wins over `&` and `2>>` over `2>`.
+const SHELL_OPERATORS = ['2>&1', '&>>', '2>>', '&&', '||', '>>', '<<', '2>', '&>', '|&', '|', ';', '&', '>', '<', '(', ')']
+
+/**
+ * Color one shell command line as codex's `Ran` cards do with their bash grammar: the program
+ * each pipeline stage runs, operators and redirections, strings, variables, and a trailing
+ * comment. Flags and arguments stay plain.
+ * @param line - one line of the command.
+ * @returns styled runs covering the whole line.
+ */
+export function highlightCommand(line: string): HighlightSpan[] {
+  const spans: HighlightSpan[] = []
+  const push = spanPusher(spans)
+  let expectCommand = true
+  let index = 0
+  while (index < line.length) {
+    const rest = line.slice(index)
+    const char = line[index] ?? ''
+    if (/\s/u.test(char)) {
+      push(char, '')
+      index += 1
+      continue
+    }
+    if (char === '#' && (index === 0 || /\s/u.test(line[index - 1] ?? ''))) {
+      push(rest, STYLE.comment)
+      break
+    }
+    const operator = SHELL_OPERATORS.find(candidate => rest.startsWith(candidate))
+    if (operator !== undefined) {
+      push(operator, STYLE.keyword)
+      index += operator.length
+      // A redirection takes a target, not a program; the other operators start a new stage.
+      if (!/[<>]/u.test(operator) || operator === '2>&1') expectCommand = !/[<>]/u.test(operator)
+      continue
+    }
+    if (char === '\'' || char === '"') {
+      const end = closingQuote(line, index + 1, char)
+      const stop = end < 0 ? line.length : end
+      push(line.slice(index, stop), STYLE.string)
+      index = stop
+      expectCommand = false
+      continue
+    }
+    if (char === '$') {
+      const variable = /^\$(?:\{[^}]*\}|\(|[A-Za-z_]\w*|[?#@*!$\d])/u.exec(rest)
+      const text = variable?.[0] ?? '$'
+      push(text, STYLE.literal)
+      index += text.length
+      if (text === '$(') expectCommand = true
+      else expectCommand = false
+      continue
+    }
+    const word = /^[^\s|&;<>()'"$]+/u.exec(rest)?.[0] ?? char
+    // `NAME=value` before a program is an assignment; the program still follows.
+    const assignment = expectCommand && /^[A-Za-z_]\w*=/u.test(word)
+    if (assignment) push(word, STYLE.literal)
+    else if (expectCommand) push(word, SHELL_KEYWORDS.has(word) ? STYLE.keyword : STYLE.command)
+    else push(word, '')
+    index += word.length
+    // Control keywords such as `if` or `do` are followed by another program.
+    if (!assignment) expectCommand = expectCommand && SHELL_KEYWORDS.has(word) && word !== 'in'
+  }
+  return spans
+}
+
+/**
+ * An appender that merges a run into the previous one when the style repeats.
+ * @param spans - the runs to extend.
+ * @returns the appender.
+ */
+function spanPusher(spans: HighlightSpan[]): (text: string, style: string) => void {
+  return (text, style) => {
+    if (text === '') return
+    const last = spans.at(-1)
+    if (last !== undefined && last.style === style) spans[spans.length - 1] = { text: last.text + text, style }
+    else spans.push({ text, style })
+  }
 }
