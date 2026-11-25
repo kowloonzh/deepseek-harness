@@ -228,6 +228,7 @@ describe('terminal transcript projection', () => {
       id: 'user-1',
       kind: 'user',
       text: '[Image 1] shot.png',
+      forkSeq: 0,
     }])
   })
 
@@ -295,7 +296,7 @@ describe('terminal transcript projection', () => {
     } satisfies Extract<SessionFollowFrame, { type: 'snapshot' }>
     const state = applyFollowFrame(initialTranscript(), frame)
     expect(state.title).toBe('Restored')
-    expect(state.items).toEqual([{ id: 'user-1', kind: 'user', text: 'restored' }])
+    expect(state.items).toEqual([{ id: 'user-1', kind: 'user', text: 'restored', forkSeq: 0 }])
   })
   it('keeps a Worked for marker above the final answer of a turn that ran tools', () => {
     const events: Array<{ type: string; time: number; data: unknown }> = [
@@ -331,5 +332,16 @@ describe('terminal transcript projection', () => {
     expect(state.items.map(item => item.kind)).toEqual(['user', 'tool'])
     expect(state.items[0]).toMatchObject({ text: 'hello' })
     expect(state.items[1]).toMatchObject({ id: 'tool-result-2', toolOutput: 'orphan', toolStatus: 'ok' })
+  })
+  it('records where a fork restarts from each user message', () => {
+    const events: Array<{ type: string; seq: number; data: unknown }> = [
+      { type: 'turn/start', seq: 5, data: { turn: 1 } },
+      { type: 'user/message', seq: 6, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'first' }] } },
+      { type: 'user/message', seq: 9, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'steer' }] } },
+    ]
+    let state = initialTranscript()
+    for (const event of events) state = applyFollowFrame(state, { type: 'event', event: { ...event, time: event.seq } } as never)
+    // The turn's first message cuts before its turn/start; a steer cuts just before itself.
+    expect(state.items.filter(item => item.kind === 'user').map(item => item.forkSeq)).toEqual([4, 8])
   })
 })

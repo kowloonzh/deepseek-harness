@@ -35,6 +35,12 @@ export interface TranscriptItem {
   startedAt?: number | undefined
   /** How long a finished turn ran, in milliseconds; set only on a kept `turn` marker. */
   elapsedMs?: number | undefined
+  /**
+   * On a user item: the last event seq a fork keeps to start over from this message. A turn's
+   * first message cuts before its `turn/start`; a message steered into a running turn cuts just
+   * before itself.
+   */
+  forkSeq?: number | undefined
 }
 
 /** Token counters shown in the status line. */
@@ -98,6 +104,12 @@ export interface TranscriptState {
   imageLimits?: ImageSubmissionLimits | undefined
   liveAssistantId?: string | undefined
   liveReasoningId?: string | undefined
+  /**
+   * The last seq before the next turn's input entered the log: the latest `turn/end`, or, before
+   * the first turn, the event before the first inbox insertion. A fork cut here leaves that
+   * input out entirely instead of carrying it over as a pending message.
+   */
+  turnBoundarySeq?: number | undefined
 }
 
 /** Create an empty transcript. */
@@ -115,8 +127,12 @@ export function applySnapshot(state: TranscriptState, frame: Extract<SessionFoll
     queue: [],
     liveAssistantId: undefined,
     liveReasoningId: undefined,
+    turnBoundarySeq: undefined,
   }
-  for (const record of frame.records) next.items = applyEvent(next.items, record.event)
+  for (const record of frame.records) {
+    next.items = applyEvent(next.items, record.event, next.turnBoundarySeq)
+    next.turnBoundarySeq = boundaryAfter(next.turnBoundarySeq, record.event)
+  }
   return applyProjectionValues(next, frame.projections.values)
 }
 
@@ -125,7 +141,12 @@ export function applyFollowFrame(state: TranscriptState, frame: SessionFollowFra
   if (frame.type === 'snapshot') return applySnapshot(state, frame)
   if (frame.type === 'event') {
     const running = runningAfterEvent(state.running, frame.event.type, frame.event.data)
-    return { ...state, running, items: applyEvent(state.items, frame.event) }
+    return {
+      ...state,
+      running,
+      items: applyEvent(state.items, frame.event, state.turnBoundarySeq),
+      turnBoundarySeq: boundaryAfter(state.turnBoundarySeq, frame.event),
+    }
   }
   return applyAssistantStream(state, frame.frame)
 }
@@ -342,6 +363,7 @@ function appendLive(
 function applyEvent(
   items: TranscriptItem[],
   event: { readonly type: string; readonly seq: number; readonly time?: number; readonly data: unknown },
+  boundarySeq?: number,
 ): TranscriptItem[] {
   if (event.type === 'turn/start') {
     return [...items, { id: `turn-${String(event.seq)}`, kind: 'turn', text: '', startedAt: event.time }]
@@ -354,7 +376,7 @@ function applyEvent(
     if (source?.kind !== 'user' && source?.kind !== 'retry') return items
     const text = messageBlocks(data.content).text
     if (text.trim() === '') return items
-    return [...items, { id: `user-${String(event.seq)}`, kind: 'user', text }]
+    return [...items, { id: `user-${String(event.seq)}`, kind: 'user', text, forkSeq: forkSeqFor(items, event.seq, boundarySeq) }]
   }
   if (event.type === 'assistant/message') {
     const message = recordValue(data.message)
@@ -454,6 +476,49 @@ function endTurn(items: TranscriptItem[], time: number | undefined): TranscriptI
   const at = start + (answer > lastTool ? answer : turn.length)
   next.splice(at, 0, { ...marker, elapsedMs: Math.max(0, time - marker.startedAt) })
   return next
+}
+
+/**
+ * Where a fork that restarts from a new user message should cut the log.
+ *
+ * A turn's input is spliced into the inbox before its `turn/start`, so the first message of a
+ * turn cuts at the turn boundary before that splice; cutting at `turn/start` would keep the
+ * message as a pending inbox entry in the fork. A message steered into a running turn cuts
+ * just before itself.
+ * @param items - the transcript before the message.
+ * @param seq - the message's event seq.
+ * @param boundarySeq - the latest turn boundary, when the loaded history holds one.
+ * @returns the last seq to keep.
+ */
+function forkSeqFor(items: readonly TranscriptItem[], seq: number, boundarySeq: number | undefined): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item === undefined || item.kind === 'user') break
+    if (item.kind === 'turn' && item.elapsedMs === undefined) {
+      const start = Number(item.id.slice('turn-'.length))
+      if (boundarySeq !== undefined && boundarySeq < start) return boundarySeq
+      if (Number.isInteger(start)) return start - 1
+    }
+  }
+  return seq - 1
+}
+
+/**
+ * Advance the turn boundary past one event.
+ * @param boundary - the boundary before the event.
+ * @param event - the event.
+ * @returns the boundary after it.
+ */
+function boundaryAfter(
+  boundary: number | undefined,
+  event: { readonly type: string; readonly seq: number; readonly data: unknown },
+): number | undefined {
+  if (event.type === 'turn/end') return event.seq
+  if (boundary === undefined && event.type === 'agent/inbox/spliced') {
+    const inserted = recordValue(event.data)?.inserted
+    if (Array.isArray(inserted) && inserted.length > 0) return event.seq - 1
+  }
+  return boundary
 }
 
 function runningAfterEvent(running: boolean, type: string, data: unknown): boolean {

@@ -32,6 +32,8 @@ async function mountTerminal(): Promise<{
   app: () => TuiApp
   input: PassThrough
   screen: () => string
+  /** Every byte written to the terminal so far, escapes included. */
+  written: () => string
   sessionId: string
   stop: () => Promise<void>
 }> {
@@ -47,7 +49,8 @@ async function mountTerminal(): Promise<{
   stdout.rows = 24
   stdout.columns = 120
   // Drain the byte stream so the app never blocks on a full pipe.
-  output.on('data', () => {})
+  let written = ''
+  output.on('data', (chunk: Buffer) => { written += chunk.toString() })
   let app: TuiApp | undefined
   const remote = await TuiRemoteClient.connect({
     ...normalizeEntryUrl(host.authenticatedUrl), close: async () => {},
@@ -71,6 +74,7 @@ async function mountTerminal(): Promise<{
     // The current frame, not the accumulated stream: a row that scrolled away must not keep
     // matching a later assertion.
     screen: () => (app?.screenLines() ?? []).join('\n').replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, ''),
+    written: () => written,
     sessionId,
     stop: async () => {
       input.write('\u0003/quit\r')
@@ -126,6 +130,44 @@ describe('composer keys', () => {
       await terminal.stop()
     }
   }, 60_000)
+
+  it('folds a large paste, notifies when an unfocused turn ends, and forks on Esc Esc Enter', async () => {
+    const terminal = await mountTerminal()
+    try {
+      await expect.poll(() => terminal.screen()).toContain('deepseek-v4-flash')
+      // A bracketed paste over the threshold shows as a placeholder, not as its text.
+      const pasted = `Reply with a one-sentence description of event sourcing, then stop. ${'x'.repeat(1100)}`
+      terminal.input.write(`\u001b[200~${pasted}\u001b[201~`)
+      await expect.poll(() => terminal.screen()).toContain(`[Pasted Content ${String(pasted.length)} chars]`)
+      expect(terminal.screen()).not.toContain('xxxxxxxxxx')
+      // The operator looks away; the turn's end then posts a notification (BEL without OSC 9).
+      terminal.input.write('\u001b[O')
+      terminal.input.write(KEY.enter)
+      await expect.poll(() => terminal.screen()).toContain('· running')
+      // The title spins while the turn runs, and the full paste reached the transcript.
+      await expect.poll(() => terminal.written()).toMatch(/\u001b\]0;[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u)
+      await expect.poll(() => terminal.screen(), { timeout: 30_000 }).toContain('· idle')
+      expect(terminal.written()).toContain('\u0007')
+      expect(terminal.app().screenLines().join('\n')).toContain('xxxxxxxxxx')
+
+      // Esc arms the backtrack, a second Esc selects the latest message, Enter forks before it.
+      terminal.input.write('\u001b[I')
+      terminal.input.write(KEY.escape)
+      await expect.poll(() => terminal.screen()).toContain('Esc again to edit a previous message')
+      terminal.input.write(KEY.escape)
+      await expect.poll(() => terminal.screen()).toContain('Enter edit from here')
+      terminal.input.write(KEY.enter)
+      await expect.poll(() => terminal.screen()).toContain('Forked before the selected message')
+      // The fork starts before the message, so the composer holds it again and the
+      // transcript no longer shows the earlier turn's reply.
+      // The fork holds nothing of the selected message: no reply, and no carried-over queue row.
+      await expect.poll(() => terminal.screen()).toContain('Type a message or /help')
+      expect(terminal.screen()).not.toContain('queued:')
+      expect(terminal.screen()).toContain('❯ Reply with a one-sentence description')
+    } finally {
+      await terminal.stop()
+    }
+  }, 90_000)
 
   it('interrupts and sends on Ctrl+Enter', async () => {
     await expectSentDraftBreaksOut(KEY.ctrlEnter)

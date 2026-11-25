@@ -162,6 +162,16 @@ export class TuiRemoteClient {
     }), 'session create').sessionId
   }
 
+  /**
+   * Fork a Session at an exact event, keeping that event and everything before it.
+   * @param sessionId - the source Session, left unchanged.
+   * @param atSeq - the last event seq the fork keeps.
+   * @returns the new Session.
+   */
+  async forkSession(sessionId: SessionId, atSeq: number): Promise<SessionId> {
+    return unwrap(await this.context.remote.session.fork({ sessionId, atSeq }), 'session fork').sessionId
+  }
+
   /** Open the live Session journal with an initial history window. */
   followSession(sessionId: SessionId, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
     return this.context.remote.session.follow({

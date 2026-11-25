@@ -32,6 +32,7 @@ const ITALIC = `${ESC}3m`
 /** Columns left of the transcript; codex starts each cell's gutter at the edge. */
 const TRANSCRIPT_LEFT_PADDING = 0
 const USER_BLOCK_STYLE = `${ESC}97m${ESC}48;5;238m`
+const USER_SELECTED_STYLE = `${ESC}97m${ESC}48;5;24m`
 const USER_PROMPT_PREFIX = '› '
 const OSC = '\u001b]'
 const ST = '\u001b\\'
@@ -143,6 +144,7 @@ interface TranscriptRenderCache {
   readonly items: readonly TranscriptItem[]
   readonly width: number
   readonly expandedTools: boolean
+  readonly highlight: string | undefined
   readonly lines: string[]
   readonly owners: RowOwner[]
 }
@@ -170,6 +172,8 @@ export interface RenderViewOptions {
   readonly now?: number
   readonly notice: string | undefined
   readonly selection?: TerminalSelection | undefined
+  /** The user message a backtrack selection points at, drawn highlighted. */
+  readonly highlightItem?: string | undefined
 }
 
 /**
@@ -383,14 +387,16 @@ export class TerminalRenderer {
     if (cached !== undefined
       && cached.items === options.state.items
       && cached.width === width
-      && cached.expandedTools === options.expandedTools) {
+      && cached.expandedTools === options.expandedTools
+      && cached.highlight === options.highlightItem) {
       return cached
     }
-    const { lines, owners } = transcriptLines(options.state.items, options.expandedTools, width)
+    const { lines, owners } = transcriptLines(options.state.items, options.expandedTools, width, options.highlightItem)
     this.transcriptCache = {
       items: options.state.items,
       width,
       expandedTools: options.expandedTools,
+      highlight: options.highlightItem,
       lines,
       owners,
     }
@@ -520,6 +526,7 @@ function transcriptLines(
   items: readonly TranscriptItem[],
   expandedTools: boolean,
   width: number,
+  highlight?: string,
 ): { readonly lines: string[]; readonly owners: RowOwner[] } {
   const lines: string[] = []
   const owners: RowOwner[] = []
@@ -548,9 +555,12 @@ function transcriptLines(
       const contentWidth = Math.max(8, width - prefixWidth - 1)
       const wrapped = wrapText(item.text, contentWidth)
       if (wrapped.length === 0) wrapped.push('')
+      // A backtrack selection lifts its message onto a brighter block with a yellow marker.
+      const selected = item.id === highlight
+      const block = selected ? USER_SELECTED_STYLE : USER_BLOCK_STYLE
       for (const [lineIndex, line] of wrapped.entries()) {
-        const marker = lineIndex === 0 ? `${CYAN}›${USER_BLOCK_STYLE} ` : ' '.repeat(prefixWidth)
-        lines.push(`${USER_BLOCK_STYLE}${padAnsi(`${marker}${line}`, width)}${RESET}`)
+        const marker = lineIndex === 0 ? `${selected ? YELLOW : CYAN}›${block} ` : ' '.repeat(prefixWidth)
+        lines.push(`${block}${padAnsi(`${marker}${line}`, width)}${RESET}`)
       }
       lines.push('', '')
       claim(item.id)

@@ -18,6 +18,17 @@ import { localized, messages } from './locale.ts'
 import { ReadlineEditor } from './readline.ts'
 import { runShellLine, shellLine, shellResultText } from './shell.ts'
 import { HerdrReporter } from './herdr.ts'
+import {
+  notificationMethod,
+  notificationSequence,
+  RESTORE_TITLE,
+  SAVE_TITLE,
+  terminalTitle,
+  TITLE_SPINNER_INTERVAL_MS,
+  titleSequence,
+  turnCompleteMessage,
+  type NotificationMethod,
+} from './terminal-signals.ts'
 import { TuiError } from './error.ts'
 import {
   cacheHitPercent,
@@ -36,6 +47,7 @@ import {
   applySummary,
   initialTranscript,
   type QueuePrompt,
+  type TranscriptItem,
   type TranscriptState,
 } from './transcript.ts'
 import {
@@ -53,6 +65,8 @@ import {
   type SessionPicker,
 } from './ui.ts'
 
+/** A paste longer than this many characters collapses to a placeholder, as codex's composer does. */
+const LARGE_PASTE_CHARS = 1000
 const LOCAL_COMMANDS = ['help', 'new', 'resume', 'model', 'compact', 'status', 'context', 'queue', 'retry', 'exit'] as const
 /**
  * Aliases the terminal accepts without listing them in the slash menu.
@@ -219,6 +233,25 @@ export class TuiApp {
   /** Upper bound on teardown after `stop`, so a stuck host close cannot trap the terminal. */
   private exitTimer: NodeJS.Timeout | undefined
   private startupRendered = false
+  /** Large pastes behind their `[Pasted Content N chars]` placeholders, expanded on send. */
+  private readonly pastes = new Map<string, string>()
+  /** Whether the terminal has focus; it reports changes once focus tracking is on. */
+  private focused = true
+  private readonly notifyMethod: NotificationMethod
+  private readonly env: NodeJS.ProcessEnv
+  /** Whether the last report saw a running turn, to notice the moment it ends. */
+  private wasRunning = false
+  /** The approval or question already announced, so each one notifies once. */
+  private announcedInteraction: unknown
+  private titleFrame = 0
+  private titleTicker: ReturnType<typeof setInterval> | undefined
+  private lastTitle = ''
+  /** The first Escape of an idle, empty composer arms the backtrack gesture. */
+  private backtrackPrimed = false
+  /** A Session just forked by backtrack, whose first state report clears carried-over input. */
+  private forkCleanup: SessionId | undefined
+  /** Backtrack selection: which user message, counted back from the newest (0). */
+  private backtrack: { readonly back: number } | undefined
 
   private constructor(
     private readonly remote: TuiRemoteClient,
@@ -228,6 +261,8 @@ export class TuiApp {
     env: NodeJS.ProcessEnv,
     bootstrap?: { readonly prompt: string; readonly thenExit: boolean },
   ) {
+    this.env = env
+    this.notifyMethod = notificationMethod(env)
     this.terminalCleanup = this.enterTerminal()
     this.herdr = new HerdrReporter(env)
     this.bootstrap = bootstrap
@@ -367,6 +402,10 @@ export class TuiApp {
   private readonly onKeypress = (sequence: string, key: Key): void => {
     if (this.stopped) return
     if (key.name === 'paste-start' || key.name === 'paste-end') return
+    if (key.name === 'focus-in' || key.name === 'focus-out') {
+      this.focused = key.name === 'focus-in'
+      return
+    }
     if (key.name === 'key-release') return
     if (key.mouse !== undefined) {
       this.handleMouse(key.mouse)
@@ -393,6 +432,11 @@ export class TuiApp {
       this.requestRender()
       return
     }
+    if (this.backtrack !== undefined) {
+      this.handleBacktrackKey(key)
+      return
+    }
+    if (key.name !== 'escape') this.backtrackPrimed = false
     if (key.ctrl && key.name === 'c') {
       this.handleCtrlC()
       return
@@ -425,7 +469,13 @@ export class TuiApp {
       // Escape only stops things: it clears the notice, and it interrupts a running
       // turn. Sending is Enter's job, and interrupting *and* sending is Ctrl+Enter's.
       if (this.state.running) void this.interrupt()
-      else this.setNotice(undefined)
+      else if (this.input === '' && this.draftImages.length === 0 && this.userItems().length > 0) {
+        // codex's backtrack: Esc on an idle, empty composer arms it, a second Esc selects the
+        // latest message to start over from.
+        if (this.backtrackPrimed) this.moveBacktrack(0)
+        else this.setNotice(messages.backtrackHint)
+        this.backtrackPrimed = !this.backtrackPrimed
+      } else this.setNotice(undefined)
       this.requestRender()
       return
     }
@@ -632,7 +682,86 @@ export class TuiApp {
       return
     }
     if (!key.ctrl && !key.meta && sequence !== '' && !isNavigationSequence(sequence)) {
-      this.insertText(sequence.replaceAll('\r', '\n'))
+      if (key.paste === true) this.insertPaste(sequence)
+      else this.insertText(sequence.replaceAll('\r', '\n'))
+    }
+  }
+
+  private userItems(): TranscriptItem[] {
+    return this.state.items.filter(item => item.kind === 'user')
+  }
+
+  /**
+   * Select the user message `back` steps before the newest and bring it into view.
+   * @param back - 0 for the newest message.
+   */
+  private moveBacktrack(back: number): void {
+    const users = this.userItems()
+    const item = users[users.length - 1 - back]
+    if (item === undefined) return
+    this.backtrack = { back }
+    this.position = { kind: 'reading', key: item.id, offset: 0, span: 1, index: 0 }
+    this.setNotice(messages.backtrackSelecting)
+    this.requestRender()
+  }
+
+  private handleBacktrackKey(key: Key): void {
+    const back = this.backtrack?.back ?? 0
+    if (key.name === 'escape' || key.name === 'up') {
+      this.moveBacktrack(Math.min(back + 1, this.userItems().length - 1))
+      return
+    }
+    if (key.name === 'down' && back > 0) {
+      this.moveBacktrack(back - 1)
+      return
+    }
+    const users = this.userItems()
+    const item = users[users.length - 1 - back]
+    this.backtrack = undefined
+    this.position = LATEST
+    this.setNotice(undefined)
+    if ((key.name === 'return' || key.name === 'enter') && item !== undefined) void this.forkFrom(item)
+    this.requestRender()
+  }
+
+  /**
+   * Start over from a user message: fork the Session just before it, open the fork, and put the
+   * message back in the composer for editing. The source Session stays as it was.
+   * @param item - the selected user message.
+   */
+  private async forkFrom(item: TranscriptItem): Promise<void> {
+    const source = this.state.sessionId
+    if (source === undefined || this.state.running) return
+    try {
+      const sessionId = item.forkSeq !== undefined && item.forkSeq >= 1
+        ? await this.remote.forkSession(source, item.forkSeq)
+        : await this.remote.createSession(this.state.cwd)
+      this.forkCleanup = sessionId
+      this.switchSession(sessionId, true)
+      this.editor.setText(item.text)
+      this.setNotice(messages.backtrackForked)
+    } catch (error) {
+      this.addError(error)
+    }
+    this.requestRender()
+  }
+
+  /**
+   * Remove queued input a fork carried over from its source, so sending the edited message does
+   * not run the original one with it.
+   * @param sessionId - the forked Session.
+   */
+  private async dropForkedQueue(sessionId: SessionId): Promise<void> {
+    for (const item of this.state.queue.filter(candidate => candidate.placement !== 'context')) {
+      try {
+        await this.remote.updateQueue(sessionId, item.id, { kind: 'remove' })
+      } catch (error) {
+        this.addError(error)
+      }
+    }
+    if (this.state.sessionId === sessionId) {
+      this.state = { ...this.state, queue: this.state.queue.filter(candidate => candidate.placement === 'context') }
+      this.requestRender()
     }
   }
 
@@ -857,7 +986,7 @@ export class TuiApp {
         return
       }
       if (content.kind === 'text') {
-        this.insertText(content.text)
+        this.insertPaste(content.text)
         this.setNotice(undefined)
         return
       }
@@ -882,7 +1011,7 @@ export class TuiApp {
   }
 
   private async submit(mode: 'queue' | 'steer', interruptFirst = false): Promise<void> {
-    const rawText = this.input
+    const rawText = this.expandPastes(this.input)
     const text = rawText.trim()
     const images = this.draftImages
     if (this.submission !== undefined) return
@@ -1304,6 +1433,10 @@ export class TuiApp {
     this.followAbort = abort
     this.queueEditId = undefined
     this.submission = undefined
+    this.backtrack = undefined
+    this.backtrackPrimed = false
+    // A different Session's idle state is not this turn ending.
+    this.wasRunning = false
     this.state = { ...initialTranscript(), sessionId, cwd: process.cwd(), model: this.defaultModel }
     this.slashSuggestions = this.localSlashSuggestions()
     this.slashIndex = 0
@@ -1411,6 +1544,10 @@ export class TuiApp {
         if (abort.signal.aborted) break
         if (this.state.sessionId !== sessionId) continue
         this.state = applySessionState(this.state, state)
+        if (this.forkCleanup === sessionId) {
+          this.forkCleanup = undefined
+          void this.dropForkedQueue(sessionId)
+        }
         this.requestRender()
       }
     } catch (error) {
@@ -1459,7 +1596,52 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /**
+   * Insert pasted text; a paste longer than codex's threshold stays out of the composer behind a
+   * `[Pasted Content N chars]` placeholder, with `#2`, `#3` for repeats of the same size, and is
+   * expanded when the message is sent.
+   * @param text - the pasted text.
+   */
+  private insertPaste(text: string): void {
+    const normalized = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n')
+    const count = Array.from(normalized).length
+    if (count <= LARGE_PASTE_CHARS) {
+      this.insertText(normalized)
+      return
+    }
+    // Placeholders deleted from the draft free their names again.
+    for (const placeholder of this.pastes.keys()) {
+      if (!this.input.includes(placeholder)) this.pastes.delete(placeholder)
+    }
+    const base = `[Pasted Content ${String(count)} chars]`
+    let placeholder = base
+    for (let suffix = 2; this.pastes.has(placeholder); suffix += 1) placeholder = `${base} #${String(suffix)}`
+    this.pastes.set(placeholder, normalized)
+    this.insertText(placeholder)
+  }
+
+  /**
+   * The draft with every paste placeholder it still holds replaced by the pasted text.
+   * @param text - the draft.
+   * @returns the text to send.
+   */
+  private expandPastes(text: string): string {
+    let expanded = text
+    for (const [placeholder, pasted] of this.pastes) expanded = expanded.replaceAll(placeholder, () => pasted)
+    return expanded
+  }
+
   private deleteBackward(): void {
+    // A placeholder is one element: Backspace at its end removes all of it, as in codex.
+    const before = Array.from(this.input).slice(0, this.inputCursor).join('')
+    const placeholder = [...this.pastes.keys()].find(name => before.endsWith(name))
+    if (placeholder !== undefined) {
+      for (let index = 0; index < Array.from(placeholder).length; index += 1) this.editor.deleteBackward()
+      this.pastes.delete(placeholder)
+      this.slashIndex = 0
+      this.requestRender()
+      return
+    }
     this.editor.deleteBackward()
     this.slashIndex = 0
     this.requestRender()
@@ -1514,6 +1696,7 @@ export class TuiApp {
           message: interaction.kind === 'approval' ? messages.approvals : messages.question,
         }),
       })
+      this.reportActivity(interaction)
     }
     // "Type a message or /help" documents that input is accepted, so it is not
     // shown before the Session opens and a submitted key cannot be lost.
@@ -1533,6 +1716,67 @@ export class TuiApp {
       this.renderMode = 'full'
       this.render(mode === 'incremental')
     }, incremental ? 8 : 33)
+  }
+
+  /**
+   * Keep the terminal outside the screen current: post a desktop notification when a turn ends
+   * or an approval or question starts waiting, and keep the window title in step.
+   * @param interaction - the approval or question waiting on the operator, if any.
+   */
+  private reportActivity(interaction: ApprovalPrompt | QuestionPrompt | Overlay | undefined): void {
+    const running = this.state.running
+    if (this.wasRunning && !running) {
+      const sinceUser = this.state.items.slice(this.state.items.findLastIndex(item => item.kind === 'user') + 1)
+      this.notify(turnCompleteMessage(sinceUser.findLast(item => item.kind === 'assistant')?.text))
+    }
+    this.wasRunning = running
+    if (interaction !== undefined && interaction !== this.announcedInteraction) {
+      if (interaction.kind === 'approval') this.notify(localized.approvalNotification(interaction.request.toolName))
+      else if (interaction.kind === 'question') {
+        const question = interaction.progress[0]?.question
+        this.notify(localized.questionNotification(question?.header ?? question?.question ?? ''))
+      }
+    }
+    this.announcedInteraction = interaction
+    this.updateTitle(interaction !== undefined)
+  }
+
+  /**
+   * Post one desktop notification, only while the terminal is unfocused, as codex's default.
+   * @param message - notification body.
+   */
+  private notify(message: string): void {
+    if (this.focused || this.stopped) return
+    const sequence = notificationSequence(message, this.notifyMethod, this.env)
+    if (sequence !== '') this.stdout.write(sequence)
+  }
+
+  /**
+   * Write the window title when it changed; a running turn animates its spinner.
+   * @param actionRequired - an approval or question is waiting.
+   */
+  private updateTitle(actionRequired: boolean): void {
+    if (this.stopped) return
+    const animate = this.state.running && !actionRequired
+    if (animate) {
+      this.titleTicker ??= setInterval(() => {
+        this.titleFrame += 1
+        this.updateTitle(false)
+      }, TITLE_SPINNER_INTERVAL_MS)
+    } else if (this.titleTicker !== undefined) {
+      clearInterval(this.titleTicker)
+      this.titleTicker = undefined
+    }
+    const title = titleSequence(terminalTitle({
+      running: this.state.running,
+      actionRequired,
+      sessionTitle: this.state.title === initialTranscript().title ? undefined : this.state.title,
+      cwd: this.state.cwd,
+      frame: this.titleFrame,
+    }))
+    if (title === '' || title === this.lastTitle) return
+    this.lastTitle = title
+    this.stdout.write(title)
   }
 
   /**
@@ -1565,6 +1809,7 @@ export class TuiApp {
       scroll: this.position,
       holdPosition: this.selection !== undefined,
       runningSince: this.runningSince,
+      highlightItem: this.backtrackItemId(),
       notice: this.notice,
       selection: this.selection,
     }, incremental)
@@ -1573,6 +1818,12 @@ export class TuiApp {
     // view reached the bottom.
     this.position = frame.position
     this.stdout.write(frame.paint)
+  }
+
+  private backtrackItemId(): string | undefined {
+    if (this.backtrack === undefined) return undefined
+    const users = this.userItems()
+    return users[users.length - 1 - this.backtrack.back]?.id
   }
 
   /** Start the turn clock and its once-a-second repaint when a turn starts; stop both after. */
@@ -1772,13 +2023,17 @@ export class TuiApp {
   private enterTerminal(): () => void {
     this.stdin.setRawMode(true)
     this.stdin.resume()
-    this.stdout.write(`\u001b[?1049h\u001b[?2004h${MOUSE_TRACKING_ON}\u001b[>1u\u001b[2J\u001b[H`)
+    // Focus reports (1004) let notifications wait until the operator looks away; the title
+    // the shell set is pushed so leaving restores it.
+    this.stdout.write(`${SAVE_TITLE}\u001b[?1049h\u001b[?2004h\u001b[?1004h${MOUSE_TRACKING_ON}\u001b[>1u\u001b[2J\u001b[H`)
     return () => {
       this.stdin.off('data', this.onData)
       this.stdout.off('resize', this.onResize)
       this.stdin.setRawMode(false)
       this.stdin.pause()
-      this.stdout.write(`\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?2004l\u001b[?1049l`)
+      if (this.titleTicker !== undefined) clearInterval(this.titleTicker)
+      this.titleTicker = undefined
+      this.stdout.write(`\u001b[<u${MOUSE_TRACKING_OFF}\u001b[?1004l\u001b[?2004l\u001b[?1049l${RESTORE_TITLE}`)
     }
   }
 
@@ -1796,6 +2051,8 @@ export class TuiApp {
     if (this.renderTimer !== undefined) clearTimeout(this.renderTimer)
     if (this.runningTicker !== undefined) clearInterval(this.runningTicker)
     this.runningTicker = undefined
+    if (this.titleTicker !== undefined) clearInterval(this.titleTicker)
+    this.titleTicker = undefined
     this.followAbort?.abort()
     process.off('SIGTERM', this.onSignal)
     process.off('SIGINT', this.onSignal)
@@ -1961,6 +2218,8 @@ interface Key {
   readonly shift?: boolean
   readonly sequence?: string
   readonly mouse?: MouseInput
+  /** Text that arrived inside a bracketed paste. */
+  readonly paste?: boolean
 }
 
 interface MouseInput {
@@ -1984,7 +2243,7 @@ export function decodeTerminalInput(value: string): Key[] {
   let pasting = false
   const flush = (): void => {
     if (text === '') return
-    result.push({ sequence: text })
+    result.push(pasting ? { sequence: text, paste: true } : { sequence: text })
     text = ''
   }
   for (let index = 0; index < value.length;) {
@@ -2007,6 +2266,8 @@ export function decodeTerminalInput(value: string): Key[] {
       }
       const known = [
         ['\u001b[200~', { name: 'paste-start' }],
+        ['\u001b[I', { name: 'focus-in' }],
+        ['\u001b[O', { name: 'focus-out' }],
         ['\u001b[201~', { name: 'paste-end' }],
         ['\u001b\r', { name: 'return', meta: true }],
         ['\u001b\u007f', { name: 'backspace', meta: true }],
