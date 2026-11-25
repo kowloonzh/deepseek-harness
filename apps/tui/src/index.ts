@@ -60,30 +60,39 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
   let app: TuiApp | undefined
   try {
     const configured = (options.env ?? process.env).DSH_URL
-    host = configured === undefined || configured.trim() === ''
-      ? await spawnWebHost({
-        entrypoint: options.entrypoint ?? requireEntrypoint(),
-        execArgv: options.execArgv ?? process.execArgv,
-        env: options.env ?? process.env,
+    // The host starts and connects behind the first frame instead of in front of it.
+    const connecting = (async () => {
+      host = configured === undefined || configured.trim() === ''
+        ? await spawnWebHost({
+          entrypoint: options.entrypoint ?? requireEntrypoint(),
+          execArgv: options.execArgv ?? process.execArgv,
+          env: options.env ?? process.env,
+        })
+        : {
+          ...normalizeEntryUrl(configured),
+          close: async () => {},
+        }
+      remote = await TuiRemoteClient.connect(host, {
+        approval: request => app === undefined
+          ? Promise.reject(new Error('TUI is still starting'))
+          : interactionHandlers(app).approval(request),
+        question: request => app === undefined
+          ? Promise.reject(new Error('TUI is still starting'))
+          : interactionHandlers(app).question(request),
+        sessionStatus: (sessionId, running) => { app?.setRunning(sessionId, running) },
+        sessionError: (sessionId, message) => { app?.remoteError(sessionId, message) },
       })
-      : {
-        ...normalizeEntryUrl(configured),
-        close: async () => {},
-      }
-    remote = await TuiRemoteClient.connect(host, {
-      approval: request => app === undefined
-        ? Promise.reject(new Error('TUI is still starting'))
-        : interactionHandlers(app).approval(request),
-      question: request => app === undefined
-        ? Promise.reject(new Error('TUI is still starting'))
-        : interactionHandlers(app).question(request),
-      sessionStatus: (sessionId, running) => { app?.setRunning(sessionId, running) },
-      sessionError: (sessionId, message) => { app?.remoteError(sessionId, message) },
-    })
-    const activeHost = host
+      return remote
+    })()
+    // Quitting during startup leaves this unawaited; its failure is reported through `run`.
+    connecting.catch(() => {})
     return await TuiApp.run({
-      remote,
-      hostClose: () => activeHost.close(),
+      remote: connecting,
+      // A host still starting is waited for, so quitting early cannot leave it behind.
+      hostClose: async () => {
+        await connecting.catch(() => {})
+        await host?.close()
+      },
       resume: parsed.resume,
       prompt: parsed.prompt,
       stdin,

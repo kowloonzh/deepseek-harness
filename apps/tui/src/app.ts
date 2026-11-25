@@ -69,6 +69,8 @@ import {
 
 /** A paste longer than this many characters collapses to a placeholder, as codex's composer does. */
 const LARGE_PASTE_CHARS = 1000
+/** How long `/exit` waits for the host to confirm it cancelled the running turn. */
+const EXIT_CANCEL_WAIT_MS = 3000
 const LOCAL_COMMANDS = ['help', 'new', 'resume', 'model', 'compact', 'status', 'context', 'queue', 'retry', 'exit'] as const
 /**
  * Aliases the terminal accepts without listing them in the slash menu.
@@ -88,7 +90,7 @@ const LOCAL_COMMAND_DESCRIPTIONS: Readonly<Record<(typeof LOCAL_COMMANDS)[number
   context: 'Show context and token usage',
   queue: 'Manage pending messages',
   retry: 'Continue the latest failed turn',
-  exit: 'Exit the TUI',
+  exit: 'Interrupt the running turn and exit the TUI',
 }
 const MOUSE_TRACKING_ON = '\u001b[?1000h\u001b[?1002h\u001b[?1006h'
 const MOUSE_TRACKING_OFF = '\u001b[?1000l\u001b[?1002l\u001b[?1006l'
@@ -234,7 +236,12 @@ export class TuiApp {
   private readonly bootstrapRun: boolean
   /** Upper bound on teardown after `stop`, so a stuck host close cannot trap the terminal. */
   private exitTimer: NodeJS.Timeout | undefined
-  private startupRendered = false
+  /** The Remote client once the host is up; the screen and input work before it. */
+  private connection: TuiRemoteClient | undefined
+  /** Settles with the first Session once it opens. */
+  private readonly sessionReady: Promise<SessionId>
+  private resolveSessionReady: (sessionId: SessionId) => void = () => {}
+  private readonly exited: Promise<number>
   /** Large pastes behind their `[Pasted Content N chars]` placeholders, expanded on send. */
   private readonly pastes = new Map<string, string>()
   /** Whether the terminal has focus; it reports changes once focus tracking is on. */
@@ -264,7 +271,6 @@ export class TuiApp {
   private backtrack: { readonly back: number } | undefined
 
   private constructor(
-    private readonly remote: TuiRemoteClient,
     private readonly hostClose: () => Promise<void>,
     private readonly stdin: NodeJS.ReadStream,
     private readonly stdout: NodeJS.WriteStream,
@@ -277,6 +283,22 @@ export class TuiApp {
     this.herdr = new HerdrReporter(env)
     this.bootstrap = bootstrap
     this.bootstrapRun = bootstrap !== undefined
+    this.exited = new Promise((resolve) => {
+      this.resolveExit = resolve
+    })
+    this.sessionReady = new Promise((resolve) => {
+      this.resolveSessionReady = resolve
+    })
+  }
+
+  /**
+   * The connected Remote client. Every caller runs once a Session is open, which needs the
+   * connection first; the startup frame and its input never reach it.
+   * @returns the client.
+   */
+  private get remote(): TuiRemoteClient {
+    if (this.connection === undefined) throw new TuiError('NOT_CONNECTED', 'the session host is still starting')
+    return this.connection
   }
 
   private get input(): string {
@@ -293,7 +315,8 @@ export class TuiApp {
    * @returns process exit code.
    */
   static async run(options: {
-    readonly remote: TuiRemoteClient
+    /** The client, or its connection still under way: the screen opens without waiting. */
+    readonly remote: TuiRemoteClient | Promise<TuiRemoteClient>
     readonly hostClose: () => Promise<void>
     readonly resume: string | true | undefined
     readonly prompt?: string | undefined
@@ -303,7 +326,6 @@ export class TuiApp {
     readonly onApp?: (app: TuiApp) => void
   }): Promise<number> {
     const app = new TuiApp(
-      options.remote,
       options.hostClose,
       options.stdin ?? process.stdin,
       options.stdout ?? process.stdout,
@@ -312,12 +334,25 @@ export class TuiApp {
     )
     options.onApp?.(app)
     try {
-      await app.openInitialSession(options.resume)
+      // Starting the host takes seconds; the composer is usable meanwhile.
       app.bindInput()
       app.bindSignals()
+      app.setNotice(messages.starting)
+      const connected = await Promise.race([
+        Promise.resolve(options.remote).then(remote => ({ remote })),
+        app.exited.then(code => ({ code })),
+      ])
+      if ('code' in connected) {
+        // Quit before the host was up: release the connection when it arrives.
+        void Promise.resolve(options.remote).then(remote => remote.close()).catch(() => {})
+        return connected.code
+      }
+      app.connection = connected.remote
+      await app.openInitialSession(options.resume)
+      if (app.notice === messages.starting) app.setNotice(undefined)
       app.requestRender()
       app.startBootstrap()
-      return await app.waitForExit()
+      return await app.exited
     } finally {
       await app.dispose()
     }
@@ -325,7 +360,8 @@ export class TuiApp {
 
   private async openInitialSession(resume: string | true | undefined): Promise<void> {
     void this.loadDefaultModel()
-    const summaries = await this.remote.listSessions()
+    // Only a resume needs the saved Sessions; a fresh launch goes straight to creating one.
+    const summaries = resume === undefined ? [] : await this.remote.listSessions()
     let sessionId: SessionId | undefined
     if (typeof resume === 'string') {
       sessionId = brandString<SessionId>(resume)
@@ -338,8 +374,12 @@ export class TuiApp {
       sessionId = await this.remote.createSession(process.cwd())
     }
     const summary = summaries.find(item => item.sessionId === sessionId)
+    // A prompt sent during startup is shown as sending until it goes out.
+    const pending = this.submission
     this.switchSession(sessionId, false)
+    this.submission = pending
     if (summary !== undefined) this.state = applySummary(this.state, summary)
+    this.resolveSessionReady(sessionId)
   }
 
   private async loadDefaultModel(): Promise<void> {
@@ -913,6 +953,26 @@ export class TuiApp {
   }
 
   /**
+   * Cancel the running turn on the way out, waiting a bounded time for the host to confirm so
+   * a host that does not answer cannot keep the terminal open.
+   * @param sessionId - the Session whose turn is running.
+   */
+  private async cancelForExit(sessionId: SessionId): Promise<void> {
+    this.setNotice(messages.interrupting)
+    this.requestRender()
+    let timer: NodeJS.Timeout | undefined
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, EXIT_CANCEL_WAIT_MS)
+      timer.unref()
+    })
+    try {
+      await Promise.race([this.remote.cancel(sessionId).catch(() => {}), bound])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
    * Interrupt the turn, then send the steer messages it had not read yet as one new turn.
    *
    * The Host keeps pending input across a cancel but does not start a turn for it, so they
@@ -1065,7 +1125,10 @@ export class TuiApp {
     const images = this.draftImages
     if (this.submission !== undefined) return
     if (text === '' && images.length === 0) return
-    if (this.state.sessionId === undefined) return
+    if (this.state.sessionId === undefined) {
+      await this.submitBeforeSession(rawText, text, images)
+      return
+    }
     if (text.startsWith('/') && images.length > 0 && this.localCommandName(text) !== undefined) {
       this.setNotice(messages.imagesWithLocalCommand)
       return
@@ -1118,6 +1181,43 @@ export class TuiApp {
       this.position = LATEST
       this.setNotice(undefined)
     } catch (error) {
+      this.addError(error)
+    } finally {
+      this.submission = undefined
+      this.requestRender()
+    }
+  }
+
+  /**
+   * Enter while the host is still starting: a prompt waits, shown as sending, and goes out as
+   * soon as the Session opens. `/exit` and `/help` work at once; other commands need the Session.
+   */
+  private async submitBeforeSession(rawText: string, text: string, images: readonly ClipboardImage[]): Promise<void> {
+    if (text.startsWith('/') || shellLine(text) !== undefined) {
+      const name = text.startsWith('/') ? this.localCommandName(text) : undefined
+      if (name === 'exit' || name === 'help') {
+        this.editor.clear()
+        await this.runTerminalCommand(text)
+      } else {
+        this.setNotice(messages.starting)
+      }
+      this.requestRender()
+      return
+    }
+    const display = text === '' ? localized.imageOnlyPrompt(images.length) : text
+    this.submission = { mode: QUEUE_MODE, text: display, imageCount: images.length }
+    this.history.push(display)
+    this.historyIndex = this.history.length
+    this.editor.clear()
+    this.draftImages = []
+    this.requestRender()
+    const sessionId = await this.sessionReady
+    try {
+      await this.remote.prompt(sessionId, buildPromptContent(rawText, images), QUEUE_MODE)
+      this.setNotice(undefined)
+    } catch (error) {
+      // Give the words back rather than lose them.
+      if (this.input === '') this.editor.setText(rawText)
       this.addError(error)
     } finally {
       this.submission = undefined
@@ -1184,6 +1284,9 @@ export class TuiApp {
     // `/exit` is the command launchers send to stop a worker; `/quit` and `/q`
     // stay as aliases so existing habits keep working.
     if (name === 'exit' || name === 'quit' || name === 'q') {
+      // A host that outlives this terminal (`DSH_URL`) would keep the turn running after the
+      // terminal is gone; leaving ends it too.
+      if (this.state.running && this.state.sessionId !== undefined) await this.cancelForExit(this.state.sessionId)
       this.stop(0)
       return
     }
@@ -1747,12 +1850,6 @@ export class TuiApp {
       })
       this.reportActivity(interaction)
     }
-    // "Type a message or /help" documents that input is accepted, so it is not
-    // shown before the Session opens and a submitted key cannot be lost.
-    if (this.state.sessionId === undefined) {
-      this.renderStartup()
-      return
-    }
     // A queued request must keep the slower full-repaint window: upgrading an
     // incremental wait to a full repaint would clear the screen every 8ms.
     if (this.stopped) return
@@ -1862,15 +1959,7 @@ export class TuiApp {
     this.stdout.write(title)
   }
 
-  /**
-   * Paint the header and footer before the Session exists so a launcher waiting on
-   * screen text sees one stable frame regardless of how long Session creation takes.
-   */
-  private renderStartup(): void {
-    if (this.stopped || this.startupRendered) return
-    this.startupRendered = true
-    this.stdout.write(`\u001b[2J\u001b[H${messages.appTitle}\r\n${messages.starting}\r\n`)
-  }
+
 
   private render(incremental: boolean): void {
     const suggestions = this.slashMenuOpen() ? this.visibleSlashSuggestions() : []
@@ -2121,12 +2210,6 @@ export class TuiApp {
     }
   }
 
-  private waitForExit(): Promise<number> {
-    return new Promise((resolve) => {
-      this.resolveExit = resolve
-    })
-  }
-
   private resolveExit: (code: number) => void = () => {}
 
   private stop(code: number): void {
@@ -2144,7 +2227,7 @@ export class TuiApp {
     process.off('SIGINT', this.onSignal)
     // Tell the host this frontend is gone instead of leaving the disconnect
     // event as the only signal; the host decides whether the Session survives.
-    void this.remote.close().catch(() => {})
+    void this.connection?.close().catch(() => {})
     // A stalled host close must not hold the terminal in raw mode forever. The
     // timer stays unref'd so it never keeps a finished process alive on its own.
     this.exitTimer ??= setTimeout(() => {
@@ -2164,7 +2247,7 @@ export class TuiApp {
     this.slashCatalogAbort?.abort()
     await Promise.all(this.subscriptions)
     await this.herdr.close()
-    await this.remote.close().catch(() => {})
+    await this.connection?.close().catch(() => {})
     await this.hostClose().catch(() => {})
   }
 }

@@ -1591,8 +1591,9 @@ function statusRow(
 ): string {
   const allowance = formatQuota(quota, now)
   const lowest = Math.min(...quota.map(window => window.remaining))
+  // Before the Session opens the model is not known yet, not the default.
   const model = state.model === undefined
-    ? messages.defaultModel
+    ? state.sessionId === undefined ? undefined : messages.defaultModel
     : `${state.model.model}${state.model.reasoningEffort === undefined ? '' : ` ${state.model.reasoningEffort}`}`
   const context = contextPercent(state)
   const cache = cacheHitPercent(state.tokens)
@@ -1600,7 +1601,7 @@ function statusRow(
   // and state cyan, path and usage green). Token totals and the permission mode live in
   // `/status`; the running tool already has its own card and the status indicator.
   const segments: StatusSegment[] = [
-    { text: model, style: CYAN },
+    ...(model === undefined ? [] : [{ text: model, style: CYAN }]),
     { text: shortenHome(state.cwd), style: GREEN, shrinks: true },
     ...(context === undefined ? [] : [{ text: context, style: GREEN }]),
     ...(cache === undefined ? [] : [{ text: `cache ${String(cache)}%`, style: GREEN }]),
