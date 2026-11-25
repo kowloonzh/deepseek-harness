@@ -46,6 +46,7 @@ import {
   applySessionState,
   applySummary,
   initialTranscript,
+  steerResend,
   type QueuePrompt,
   type TranscriptItem,
   type TranscriptState,
@@ -466,9 +467,10 @@ export class TuiApp {
         this.requestRender()
         return
       }
-      // Escape only stops things: it clears the notice, and it interrupts a running
-      // turn. Sending is Enter's job, and interrupting *and* sending is Ctrl+Enter's.
-      if (this.state.running) void this.interrupt()
+      // Escape stops things: it clears the notice, and it interrupts a running turn. Steer
+      // messages still waiting for a step boundary are then sent at once as a new turn, as
+      // codex does; sending the draft is Enter's job, and interrupting with it Ctrl+Enter's.
+      if (this.state.running) void this.interruptAndSendSteers()
       else if (this.input === '' && this.draftImages.length === 0 && this.userItems().length > 0) {
         // codex's backtrack: Esc on an idle, empty composer arms it, a second Esc selects the
         // latest message to start over from.
@@ -899,6 +901,44 @@ export class TuiApp {
     } catch (error) {
       this.addError(error)
     }
+  }
+
+  /**
+   * Interrupt the turn, then send the steer messages it had not read yet as one new turn.
+   *
+   * The Host keeps pending input across a cancel but does not start a turn for it, so they
+   * would otherwise wait for the next message. They are removed and resent merged in order.
+   * They stay where they are when {@link steerResend} finds they cannot be resent faithfully.
+   */
+  private async interruptAndSendSteers(): Promise<void> {
+    const sessionId = this.state.sessionId
+    if (sessionId === undefined) return
+    const plan = steerResend(this.state.queue)
+    await this.interrupt()
+    if (plan.kind === 'none' || this.state.sessionId !== sessionId) return
+    if (plan.kind !== 'send') {
+      this.setNotice(plan.kind === 'behind-queue' ? messages.steersKeptBehindQueue : messages.steersKeptWithAttachments)
+      this.requestRender()
+      return
+    }
+    const removed: QueuePrompt[] = []
+    try {
+      for (const item of plan.items) {
+        await this.remote.updateQueue(sessionId, item.id, { kind: 'remove' })
+        removed.push(item)
+      }
+      this.state = { ...this.state, queue: this.state.queue.filter(item => !removed.includes(item)) }
+      // A cancelled turn that is still winding down takes this as the next turn and starts it
+      // once it settles.
+      await this.remote.prompt(sessionId, buildPromptContent(plan.text, []), QUEUE_MODE)
+      this.setNotice(localized.steersSent(plan.items.length))
+    } catch (error) {
+      // Whatever was already taken out of the queue goes back to the composer, not lost.
+      const lost = removed.map(item => item.text.trim()).filter(part => part !== '').join('\n\n')
+      if (lost !== '' && this.input === '' && this.state.sessionId === sessionId) this.editor.setText(lost)
+      this.addError(error)
+    }
+    this.requestRender()
   }
 
   private async removeQueueItem(item: QueuePrompt): Promise<void> {

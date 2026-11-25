@@ -15,6 +15,7 @@ import {
   applySessionState,
   applySummary,
   initialTranscript,
+  steerResend,
 } from '../src/transcript.ts'
 
 const sessionId = brandString<SessionId>('session-test')
@@ -343,5 +344,20 @@ describe('terminal transcript projection', () => {
     for (const event of events) state = applyFollowFrame(state, { type: 'event', event: { ...event, time: event.seq } } as never)
     // The turn's first message cuts before its turn/start; a steer cuts just before itself.
     expect(state.items.filter(item => item.kind === 'user').map(item => item.forkSeq)).toEqual([4, 8])
+  })
+  it('resends unread steers merged after an interrupt, unless it cannot do so faithfully', () => {
+    const prompt = (id: string, placement: 'queued' | 'steering' | 'context', text: string, editable = true) => ({
+      id, placement, text, imageCount: editable ? 0 : 1, fileCount: 0, editable,
+    })
+    expect(steerResend([])).toEqual({ kind: 'none' })
+    expect(steerResend([prompt('c', 'context', 'runtime')])).toEqual({ kind: 'none' })
+    const first = prompt('a', 'steering', ' first ')
+    const second = prompt('b', 'steering', 'second')
+    expect(steerResend([first, prompt('c', 'context', 'runtime'), second]))
+      .toEqual({ kind: 'send', items: [first, second], text: 'first\n\nsecond' })
+    // A resend would join the back of the queue, after a message already queued.
+    expect(steerResend([prompt('q', 'queued', 'later'), first])).toEqual({ kind: 'behind-queue' })
+    // Only the text of a pending message is known, so an attachment would be dropped.
+    expect(steerResend([first, prompt('i', 'steering', 'shot', false)])).toEqual({ kind: 'attachments' })
   })
 })

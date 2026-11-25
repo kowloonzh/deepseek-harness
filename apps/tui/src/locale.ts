@@ -57,6 +57,8 @@ export const messages = {
   questionCustom: 'Enter submit · Esc cancel',
   exitHint: 'Press Ctrl+C again to exit',
   interrupted: 'Turn interrupted',
+  steersKeptBehindQueue: 'Turn interrupted · steer messages kept: queued messages are ahead of them, so they were not sent',
+  steersKeptWithAttachments: 'Turn interrupted · steer messages with attachments kept; they go with your next message',
   noSavedSessions: 'No saved sessions',
   loading: 'Loading...',
   loadingCommands: 'Loading commands and skills...',
@@ -114,6 +116,9 @@ export const localized = {
   selectionCopied: (characters: number): string => `Copied ${String(characters)} characters`,
   resumeSession: (sessionId: string): string => `\nResume this session with:\ndsh tui --resume ${sessionId}\n`,
   shellRunning: (command: string): string => `running !${command}`,
+  steersSent: (count: number): string => count === 1
+    ? 'Turn interrupted · sent the steer message as a new turn'
+    : `Turn interrupted · sent ${String(count)} steer messages as one new turn`,
   approvalNotification: (tool: string): string => `Approval requested: ${tool}`,
   questionNotification: (title: string): string => title === '' ? 'Question' : `Question: ${title}`,
   shellOutputTruncated: (kilobytes: number): string => `[output truncated at ${String(kilobytes)} KB]`,

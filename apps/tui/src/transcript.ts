@@ -600,3 +600,28 @@ function stringValue(value: unknown): string | undefined {
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
+
+/** What Esc does with the steer messages a cancelled turn had not read yet. */
+export type SteerResend =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'behind-queue' | 'attachments' }
+  | { readonly kind: 'send'; readonly items: readonly QueuePrompt[]; readonly text: string }
+
+/**
+ * Decide how to resend unread steer messages after an interrupt, as codex submits pending
+ * steers as one new turn.
+ *
+ * A resend joins the back of the Host queue and carries text only, so the steers stay put when
+ * queued messages are ahead of them (the resend would run after those) or when one of them has
+ * attachments.
+ * @param queue - the pending messages when Esc was pressed.
+ * @returns the steers to remove and the merged text to send, or why they stay.
+ */
+export function steerResend(queue: readonly QueuePrompt[]): SteerResend {
+  const steers = queue.filter(item => item.placement === 'steering')
+  if (steers.length === 0) return { kind: 'none' }
+  if (queue.some(item => item.placement === 'queued')) return { kind: 'behind-queue' }
+  if (steers.some(item => !item.editable)) return { kind: 'attachments' }
+  const text = steers.map(item => item.text.trim()).filter(part => part !== '').join('\n\n')
+  return text === '' ? { kind: 'none' } : { kind: 'send', items: steers, text }
+}

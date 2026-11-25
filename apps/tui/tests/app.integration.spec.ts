@@ -137,7 +137,7 @@ describe('terminal prompt lifecycle', () => {
     }
   }, 60_000)
 
-  it('steers with Enter and manages the dock through /queue', async () => {
+  it('steers with Enter, manages the dock through /queue, and sends unread steers on Escape', async () => {
     const host = await launchWebScaffold({
       replayFixture: resolve(import.meta.dirname, '../../../snapshots/web/live-interactions/session.v3.jsonl'),
       compareReplaySession: false,
@@ -183,13 +183,21 @@ describe('terminal prompt lifecycle', () => {
       input.write('\u0015')
       input.write('queued follow-up\r')
       await expect.poll(frame).toContain('steer: queued follow-up')
-      // Escape only stops the turn.
-      input.write('\u001b')
-      await expect.poll(frame).not.toContain('· running')
+      input.write('second steer\r')
+      await expect.poll(frame).toContain('steer: second steer')
+      // /queue removes a pending message.
       input.write('/queue\r')
       await expect.poll(frame).toContain('Pending messages')
+      input.write('\u001b[B')
       input.write('d')
-      await expect.poll(frame).not.toContain('queued follow-up')
+      await expect.poll(frame).not.toContain('steer: second steer')
+      // Escape stops the turn and sends the steer it had not read yet as a new turn, instead
+      // of leaving it to wait for the next message.
+      // The replay's error notice can replace the "sent" notice, so the transcript is the
+      // evidence: the steer leaves the dock and opens its own turn after the interrupted one.
+      input.write('\u001b')
+      await expect.poll(frame).toMatch(/› queued follow-up[\s\S]*script exhausted/u)
+      expect(frame()).not.toContain('steer: queued follow-up')
       await remote.cancel(sessionId).catch(() => {})
       await settled
     } finally {

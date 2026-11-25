@@ -1544,7 +1544,20 @@ export function cacheHitPercent(tokens: TranscriptState['tokens']): number | und
   return Math.min(100, Math.round((tokens.cacheRead / billed) * 100))
 }
 
+// codex insets its footer two columns from the left edge instead of starting flush.
+const STATUS_INDENT = '  '
+
 function statusLine(
+  state: TranscriptState,
+  fullWidth: number,
+  notice: string | undefined,
+  reading: boolean,
+): string {
+  if (fullWidth <= STATUS_INDENT.length) return statusRow(state, fullWidth, notice, reading)
+  return `${STATUS_INDENT}${statusRow(state, fullWidth - STATUS_INDENT.length, notice, reading)}`
+}
+
+function statusRow(
   state: TranscriptState,
   width: number,
   notice: string | undefined,
