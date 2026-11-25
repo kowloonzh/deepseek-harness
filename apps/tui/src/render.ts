@@ -27,7 +27,9 @@ const CYAN = `${ESC}36m`
 const YELLOW = `${ESC}33m`
 const RED = `${ESC}31m`
 const GREEN = `${ESC}32m`
-const TRANSCRIPT_LEFT_PADDING = 2
+const ITALIC = `${ESC}3m`
+/** Columns left of the transcript; codex starts each cell's gutter at the edge. */
+const TRANSCRIPT_LEFT_PADDING = 0
 const USER_BLOCK_STYLE = `${ESC}97m${ESC}48;5;238m`
 const USER_PROMPT_PREFIX = '› '
 const OSC = '\u001b]'
@@ -161,6 +163,10 @@ export interface RenderViewOptions {
   readonly scroll: TranscriptPosition
   /** Keep a reading position even at the bottom: a selection is pinned to the rows it covers. */
   readonly holdPosition?: boolean
+  /** When the running turn started, in epoch milliseconds; the status row counts from it. */
+  readonly runningSince?: number | undefined
+  /** The clock the frame is drawn at; defaults to `Date.now()`. */
+  readonly now?: number
   readonly notice: string | undefined
   readonly selection?: TerminalSelection | undefined
 }
@@ -295,8 +301,11 @@ export class TerminalRenderer {
     // whatever fits above it — an open view, or else the queue dock.
     const composer = composerLines(options.input, options.cursor, options.images ?? [], width, Math.max(1, paneRows - 2))
     const above = Math.max(0, paneRows - composer.lines.length)
+    const indicator = options.overlay === undefined && options.state.running && above > 0
+      ? [statusIndicatorLine(options.state, width, options.runningSince, options.now ?? Date.now())]
+      : []
     const flexible = options.overlay === undefined
-      ? queueDockLines(options.state.queue, options.submission, width, above)
+      ? [...indicator, ...queueDockLines(options.state.queue, options.submission, width, above - indicator.length)]
       : overlayLines(options.overlay, width, above).slice(0, above)
     const pane = [...flexible, ...composer.lines]
     const cursor = { line: flexible.length + composer.cursorLine, column: composer.cursorColumn }
@@ -414,7 +423,8 @@ export function selectedText(
 }
 
 function stripPromptPrefix(line: string): string {
-  return line.replace(/^(\s*)› /u, '$1')
+  // The prompt marker and the cell gutters are chrome, not content.
+  return line.replace(/^(?:› |[•■] )/u, '')
 }
 
 function highlightSelection(
@@ -532,7 +542,6 @@ function transcriptLines(
       claim(item.id)
       continue
     }
-    const prefix = itemPrefix(item)
     if (item.kind === 'user') {
       const prefixWidth = displayWidth(USER_PROMPT_PREFIX)
       const contentWidth = Math.max(8, width - prefixWidth - 1)
@@ -546,22 +555,44 @@ function transcriptLines(
       claim(item.id)
       continue
     }
-    if (item.kind === 'assistant') {
-      lines.push(...renderMarkdownLines(item.text, width))
-      lines.push('')
-      claim(item.id)
-      continue
-    }
-    const contentWidth = Math.max(8, width - displayWidth(prefix))
-    const wrapped = wrapText(item.text, contentWidth)
-    if (wrapped.length === 0) wrapped.push('')
-    lines.push(`${prefix}${wrapped[0] ?? ''}`)
-    for (const line of wrapped.slice(1)) lines.push(`${' '.repeat(displayWidth(prefix))}${line}`)
-    lines.push('')
+    // Reasoning stays out of the conversation, as in codex: its latest line rides in the
+    // bottom pane while the turn runs, and Ctrl+O brings the full text back.
+    if (item.kind === 'reasoning' && !expandedTools) continue
+    lines.push(...cellLines(item, width), '')
     claim(item.id)
   }
   if (lines.length === 0) return { lines: [`${DIM}${messages.emptyTranscript}${RESET}`], owners: [{ key: '', offset: 0 }] }
   return { lines, owners }
+}
+
+/**
+ * Rows of one non-user, non-tool item under codex's gutter: `• ` before the first row and two
+ * spaces before the rest, so every cell's text starts in the same column.
+ * @param item - an assistant, reasoning, system, or error item.
+ * @param width - columns available, gutter included.
+ * @returns the cell's rows without a trailing spacer.
+ */
+function cellLines(item: TranscriptItem, width: number): string[] {
+  const inner = Math.max(1, width - 2)
+  switch (item.kind) {
+    case 'assistant':
+      return gutter(renderMarkdownLines(item.text, inner), `${DIM}•${RESET} `)
+    case 'reasoning': {
+      // Dim italic throughout: every reset inside a row re-applies it.
+      const style = `${DIM}${ITALIC}`
+      const rows = renderMarkdownLines(item.text, inner).map(row => `${style}${row.replaceAll(RESET, `${RESET}${style}`)}${RESET}`)
+      return gutter(rows, `${DIM}•${RESET} `)
+    }
+    case 'error':
+      return gutter(wrapText(item.text === '' ? item.title ?? '' : item.text, inner).map(row => `${RED}${row}${RESET}`), `${RED}■${RESET} `)
+    default:
+      return gutter(wrapText(item.text, inner).map(row => `${DIM}${row}${RESET}`), `${DIM}•${RESET} `)
+  }
+}
+
+function gutter(rows: readonly string[], bullet: string): string[] {
+  const body = rows.length === 0 ? [''] : rows
+  return body.map((row, index) => `${index === 0 ? bullet : '  '}${row}`)
 }
 
 /**
@@ -853,8 +884,8 @@ function formatStyledLine(chars: readonly StyledChar[]): string {
 }
 
 function codeBlockLines(code: Tokens.Code, width: number): string[] {
-  const language = code.lang?.trim().split(/\s+/u, 1)[0] ?? ''
-  const lines = language === '' ? [] : [`${DIM}${language}${RESET}`]
+  // codex prints the code alone, indented, without the fence's language tag.
+  const lines: string[] = []
   for (const line of code.text.split('\n')) lines.push(...wrapText(`  ${line}`, width))
   return lines
 }
@@ -1029,109 +1060,307 @@ function tokenChildren(token: Token): readonly Token[] | undefined {
   return Array.isArray(children) ? children : undefined
 }
 
+/** Output rows a collapsed card previews, as codex's `TOOL_CALL_MAX_LINES`. */
+const TOOL_PREVIEW_ROWS = 5
+/** Command rows a collapsed `Ran` card shows after its first, as codex's exec layout. */
+const COMMAND_CONTINUATION_ROWS = 2
+/** Diff rows a collapsed `Edited` card shows. */
+const DIFF_PREVIEW_ROWS = 6
+/** Tools whose calls fold into one `Explored` card. */
+const EXPLORE_TOOLS = new Set(['read', 'grep', 'glob', 'ls'])
+/** Tools that change files and render as a diff. */
+const EDIT_TOOLS = new Set(['edit', 'write', 'str_replace_editor', 'apply_patch'])
+
+/**
+ * Cards for one run of consecutive tool calls, codex style.
+ *
+ * Each card opens with a status bullet and a verb, and hangs its detail under `└`. Consecutive
+ * reads and searches fold into one `Explored` card; commands, edits, and other calls each get
+ * their own. Collapsed cards preview a few rows of output or diff; expanded cards (Ctrl+O)
+ * show all of it. Raw call arguments are never shown: each card says what they mean.
+ * @param items - the run of tool items, oldest first.
+ * @param expanded - show full output instead of a preview.
+ * @param width - columns available to the cards.
+ * @returns the cards' rows, each card followed by one blank row.
+ */
 function toolGroupLines(items: readonly TranscriptItem[], expanded: boolean, width: number): string[] {
-  const summaries = semanticToolSummaries(items)
-  const lines = summaries.map((summary) => {
-    const color = summary.status === 'error' ? RED : summary.status === 'running' ? YELLOW : ''
-    const styled = color === '' ? summary.text : `${color}${summary.text}${RESET}`
-    return `  ${fitAnsi(styled, Math.max(1, width - 2))}`
-  })
-  // Collapsed keeps one row per summary. Expanded replaces the summaries with the
-  // per-call details, so the same work is never listed twice.
-  if (!expanded) {
-    lines.push(`  ${DIM}${fit(messages.showToolDetails, Math.max(1, width - 2))}${RESET}`)
-    return lines
-  }
-  return items.flatMap(item => toolLines(item, true, width).map(line => `  ${line}`))
-}
-
-interface ToolSummary {
-  readonly text: string
-  readonly status: ToolStatus
-}
-
-function semanticToolSummaries(items: readonly TranscriptItem[]): ToolSummary[] {
-  const blocks: Array<
-    | { readonly kind: 'single'; readonly item: TranscriptItem; readonly name: string }
-    | {
-      readonly kind: 'group'
-      readonly items: TranscriptItem[]
-      readonly verb: string
-      readonly noun: string
-      readonly alwaysCount: boolean
-      readonly subject: (item: TranscriptItem) => string
-    }
-  > = []
-  const groups = new Map<string, {
-    items: TranscriptItem[]
-    verb: string
-    noun: string
-    alwaysCount: boolean
-    subject: (item: TranscriptItem) => string
-  }>()
-  for (const item of items) {
+  const lines: string[] = []
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (item === undefined) continue
     const name = item.title ?? messages.tool
-    const group = name === 'read'
-      ? { key: 'read', verb: 'Read', noun: 'files', alwaysCount: false, subject: readSubject }
-      : name === 'bash'
-        ? { key: 'bash', verb: 'Ran', noun: 'commands', alwaysCount: false, subject: commandSubject }
-        : name === 'web_search'
-          ? { key: 'web', verb: 'Searched web', noun: 'queries', alwaysCount: false, subject: searchSubject }
-          : name === 'web_fetch'
-            ? { key: 'web-fetch', verb: 'Fetched', noun: 'pages', alwaysCount: true, subject: fetchSubject }
-            : undefined
-    if (group !== undefined) {
-      const existing = groups.get(group.key)
-      if (existing === undefined) {
-        const created = {
-          items: [item], verb: group.verb, noun: group.noun,
-          alwaysCount: group.alwaysCount, subject: group.subject,
-        }
-        groups.set(group.key, created)
-        blocks.push({ kind: 'group', ...created })
-      } else {
-        existing.items.push(item)
+    if (EXPLORE_TOOLS.has(name)) {
+      const group: TranscriptItem[] = [item]
+      while (EXPLORE_TOOLS.has(items[index + 1]?.title ?? '')) {
+        index += 1
+        const next = items[index]
+        if (next !== undefined) group.push(next)
       }
+      lines.push(...exploreCard(group, expanded, width))
+    } else {
+      lines.push(...toolCard(item, name, expanded, width))
+    }
+    if (index < items.length - 1) lines.push('')
+  }
+  return lines
+}
+
+function toolStatusOf(item: TranscriptItem): ToolStatus {
+  return item.toolStatus ?? (item.toolOutput === undefined ? 'running' : 'ok')
+}
+
+/**
+ * The bullet a card opens with: yellow while running, red once failed, otherwise `done`.
+ * @param status - the card's status.
+ * @param done - the style of a finished bullet.
+ * @returns the styled bullet and its trailing space.
+ */
+function cardBullet(status: ToolStatus, done = GREEN): string {
+  const color = status === 'running' ? YELLOW : status === 'error' ? RED : done
+  return `${color}•${RESET} `
+}
+
+/**
+ * A card's title row followed by wrapped continuation rows hung under `prefix`.
+ * @param bullet - the styled bullet.
+ * @param verb - the bold verb.
+ * @param subject - the rest of the title.
+ * @param width - columns available.
+ * @returns the title rows.
+ */
+function cardTitle(bullet: string, verb: string, subject: string, width: number): string[] {
+  const head = `${BOLD}${verb}${RESET}`
+  if (subject === '') return [`${bullet}${head}`]
+  const wrapped = wrapText(subject, Math.max(1, width - 2 - displayWidth(verb) - 1))
+  return [`${bullet}${head} ${wrapped[0] ?? ''}`, ...wrapped.slice(1).map(line => `  ${line}`)]
+}
+
+/**
+ * Rows hung under a card: `  └ ` before the first, four spaces before the rest.
+ * @param rows - styled rows, already fitted to `width - 4`.
+ * @returns the hung rows.
+ */
+function hang(rows: readonly string[]): string[] {
+  return rows.map((row, index) => `${DIM}${index === 0 ? '  └ ' : '    '}${RESET}${row}`)
+}
+
+/**
+ * Output rows, previewed as codex does: the head and tail of long output around one row that
+ * counts what was left out.
+ * @param text - the output.
+ * @param expanded - show every row.
+ * @param width - columns for each row.
+ * @param style - the style each row is drawn in.
+ * @returns styled rows.
+ */
+function outputRows(text: string, expanded: boolean, width: number, style = DIM): string[] {
+  const rows = wrapText(text.replace(/\s+$/u, ''), Math.max(1, width))
+  if (expanded || rows.length <= TOOL_PREVIEW_ROWS) return rows.map(row => `${style}${row}${RESET}`)
+  const keep = Math.floor((TOOL_PREVIEW_ROWS - 1) / 2)
+  return [
+    ...rows.slice(0, keep).map(row => `${style}${row}${RESET}`),
+    `${DIM}${omittedRows(rows.length - keep * 2)}${RESET}`,
+    ...rows.slice(-keep).map(row => `${style}${row}${RESET}`),
+  ]
+}
+
+function omittedRows(count: number): string {
+  return `… +${String(count)} ${count === 1 ? 'line' : 'lines'} (Ctrl+O)`
+}
+
+/**
+ * One `Explored` card for consecutive reads and searches.
+ *
+ * Consecutive reads share one `Read a, b` row; each search or listing gets its own row. A
+ * failed call is marked on its row, and expanded cards hang each call's output under it.
+ */
+function exploreCard(items: readonly TranscriptItem[], expanded: boolean, width: number): string[] {
+  const status = combinedStatus(items)
+  const verb = status === 'running' ? 'Exploring' : 'Explored'
+  const inner = Math.max(1, width - 4)
+  const rows: string[] = []
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (item === undefined) continue
+    if (item.title === 'read' && !expanded) {
+      const names = [readName(item)]
+      let failed = toolStatusOf(item) === 'error'
+      while (items[index + 1]?.title === 'read') {
+        index += 1
+        const next = items[index]
+        if (next === undefined) continue
+        names.push(readName(next))
+        failed ||= toolStatusOf(next) === 'error'
+      }
+      rows.push(...exploreRow('Read', [...new Set(names)].join(', '), failed, inner))
       continue
     }
-    blocks.push({ kind: 'single', item, name })
+    const [action, subject] = exploreAction(item)
+    rows.push(...exploreRow(action, subject, toolStatusOf(item) === 'error', inner))
+    if (expanded && item.toolOutput !== undefined && item.toolOutput.trim() !== '') {
+      rows.push(...outputRows(item.toolOutput, true, Math.max(1, inner - 2)).map(row => `  ${row}`))
+    } else if (toolStatusOf(item) === 'error' && item.toolOutput !== undefined) {
+      rows.push(...outputRows(item.toolOutput, false, Math.max(1, inner - 2), RED).map(row => `  ${row}`))
+    }
   }
-  return blocks.map(block => block.kind === 'single'
-    ? singleToolSummary(block.item, block.name)
-    : groupedToolSummary(block.items, block.verb, block.noun, block.alwaysCount, block.subject))
+  return [`${cardBullet(status, DIM)}${BOLD}${verb}${RESET}`, ...hang(rows)]
 }
 
-function groupedToolSummary(
-  items: readonly TranscriptItem[],
-  verb: string,
-  noun: string,
-  alwaysCount: boolean,
-  subject: (item: TranscriptItem) => string,
-): ToolSummary {
-  const status = combinedStatus(items)
-  if (items.length === 1 && !alwaysCount) {
-    const [item] = items
-    const value = item === undefined ? '' : subject(item)
-    return { text: `${statusPrefix(verb, status)}${value === '' ? '' : ` ${value}`}`, status }
-  }
-  return { text: `${verb} ${String(items.length)} ${noun} · ${statusText(status)}`, status }
+function exploreRow(action: string, subject: string, failed: boolean, width: number): string[] {
+  const mark = failed ? ` ${RED}(failed)${RESET}` : ''
+  const wrapped = wrapText(subject, Math.max(1, width - displayWidth(action) - 1 - (failed ? 9 : 0)))
+  return [
+    `${CYAN}${action}${RESET} ${wrapped[0] ?? ''}${mark}`,
+    ...wrapped.slice(1).map(line => `${' '.repeat(displayWidth(action) + 1)}${line}`),
+  ]
 }
 
-function singleToolSummary(item: TranscriptItem, name: string): ToolSummary {
-  const status = item.toolStatus ?? (item.toolOutput === undefined ? 'running' : 'ok')
+function exploreAction(item: TranscriptItem): [string, string] {
   const args = parsedToolArguments(item)
-  if (name === 'skill') {
-    const skill = stringField(args, 'name')
-    return { text: `Loaded skill${skill === undefined ? '' : ` ${skill}`}`, status }
+  if (item.title === 'read') return ['Read', readSubject(item)]
+  const pattern = stringField(args, 'pattern') ?? item.text
+  const path = stringField(args, 'path')
+  const scope = path === undefined ? '' : ` in ${path}`
+  if (item.title === 'glob') return ['List', `${pattern}${scope}`]
+  if (item.title === 'ls') return ['List', path ?? item.text]
+  return ['Search', `${pattern}${scope}`]
+}
+
+function readName(item: TranscriptItem): string {
+  const path = readSubject(item)
+  return path.split(/[\\/]/u).at(-1) ?? path
+}
+
+/** One card for a call that is not a read or a search. */
+function toolCard(item: TranscriptItem, name: string, expanded: boolean, width: number): string[] {
+  const status = toolStatusOf(item)
+  const inner = Math.max(1, width - 4)
+  const output = item.toolOutput ?? ''
+  const failure = status === 'error' && output.trim() !== '' ? outputRows(output, expanded, inner, RED) : []
+  if (name === 'bash') return commandCard(item, status, expanded, width)
+  if (EDIT_TOOLS.has(name)) {
+    const change = fileChange(item, name)
+    const verb = status === 'running' ? 'Editing' : change.added ? 'Added' : 'Edited'
+    const counts = `${GREEN}+${String(change.plus)}${RESET} ${RED}-${String(change.minus)}${RESET}`
+    const title = `${cardBullet(status)}${BOLD}${verb}${RESET} ${fit(change.path, Math.max(1, width - verb.length - 14))} (${counts})`
+    return [title, ...hang(failure.length > 0 ? failure : diffRows(change.rows, expanded, inner))]
   }
-  if (['write', 'edit', 'str_replace_editor', 'apply_patch'].includes(name)) {
-    const path = stringField(args, 'file_path') ?? stringField(args, 'path') ?? item.text
-    const added = countLines(stringField(args, 'content') ?? stringField(args, 'new_string'))
-    const removed = countLines(stringField(args, 'old_string'))
-    return { text: `Edited ${path} (+${String(added)} -${String(removed)})`, status }
+  if (name === 'todo_write') {
+    const todos = parsedToolArguments(item)?.todos
+    const rows = Array.isArray(todos) ? todos.flatMap(todo => todoRow(todo, inner)) : []
+    return [`${cardBullet(status, DIM)}${BOLD}Updated Plan${RESET}`, ...hang(failure.length > 0 ? failure : rows)]
   }
-  const value = subjectFromArguments(args) || item.text
-  return { text: `${name === messages.tool ? 'Tool' : capitalize(name)}${value === '' ? '' : ` ${value}`}`, status }
+  const [verb, subject] = callTitle(item, name, status)
+  const preview = failure.length > 0
+    ? failure
+    : expanded || !['web_search', 'web_fetch', 'skill'].includes(name)
+      ? outputRows(output, expanded, inner)
+      : []
+  return [...cardTitle(cardBullet(status, DIM), verb, subject, width), ...hang(preview)]
+}
+
+function callTitle(item: TranscriptItem, name: string, status: ToolStatus): [string, string] {
+  const args = parsedToolArguments(item)
+  if (name === 'web_search') return [status === 'running' ? 'Searching' : 'Searched', searchSubject(item)]
+  if (name === 'web_fetch') return [status === 'running' ? 'Opening' : 'Opened', stringField(args, 'url') ?? item.text]
+  if (name === 'skill') return ['Loaded skill', stringField(args, 'name') ?? item.text]
+  const subject = subjectFromArguments(args) || item.text
+  return [status === 'running' ? 'Calling' : 'Called', `${name}${subject === '' ? '' : ` ${subject}`}`]
+}
+
+/** A `Ran` card: the command, its continuation rows under `│`, then its output under `└`. */
+function commandCard(item: TranscriptItem, status: ToolStatus, expanded: boolean, width: number): string[] {
+  const verb = status === 'running' ? 'Running' : 'Ran'
+  const command = commandSubject(item)
+  const rows = command.split(/\r?\n/u).flatMap((line, index) =>
+    wrapText(line, Math.max(1, width - (index === 0 ? displayWidth(verb) + 3 : 4))))
+  const lines = [`${cardBullet(status)}${BOLD}${verb}${RESET} ${rows[0] ?? ''}`]
+  const continuation = rows.slice(1)
+  const shown = expanded ? continuation : continuation.slice(0, COMMAND_CONTINUATION_ROWS)
+  for (const row of shown) lines.push(`${DIM}  │ ${RESET}${row}`)
+  if (shown.length < continuation.length) {
+    lines.push(`${DIM}  │ … +${String(continuation.length - shown.length)} lines${RESET}`)
+  }
+  if (status === 'running' && (item.toolOutput ?? '') === '') return lines
+  const output = item.toolOutput ?? ''
+  const preview = output.trim() === ''
+    ? [`${DIM}(no output)${RESET}`]
+    : outputRows(output, expanded, Math.max(1, width - 4), status === 'error' ? RED : DIM)
+  return [...lines, ...hang(preview)]
+}
+
+interface FileChange {
+  readonly path: string
+  readonly added: boolean
+  readonly plus: number
+  readonly minus: number
+  /** Diff rows with their `+` / `-` marker. */
+  readonly rows: readonly string[]
+}
+
+/**
+ * What one edit-like call changes, read from its arguments.
+ * @param item - the tool item.
+ * @param name - the tool name.
+ * @returns the path, line counts, and diff rows.
+ */
+function fileChange(item: TranscriptItem, name: string): FileChange {
+  const args = parsedToolArguments(item)
+  if (name === 'apply_patch') {
+    const patch = stringField(args, 'input') ?? stringField(args, 'patch') ?? ''
+    const paths: string[] = []
+    const rows: string[] = []
+    let added = false
+    for (const line of patch.split(/\r?\n/u)) {
+      const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/u.exec(line)
+      if (header !== null) {
+        paths.push(header[2] ?? '')
+        added ||= header[1] === 'Add'
+        continue
+      }
+      if (/^[+-]/u.test(line)) rows.push(line)
+    }
+    const path = paths.length <= 1 ? paths[0] ?? item.text : `${String(paths.length)} files`
+    return { path, added: added && paths.length === 1, ...diffCounts(rows), rows }
+  }
+  const path = stringField(args, 'file_path') ?? stringField(args, 'path') ?? item.text
+  if (name === 'write') {
+    const rows = splitLines(stringField(args, 'content')).map(line => `+${line}`)
+    return { path, added: true, ...diffCounts(rows), rows }
+  }
+  const rows = [
+    ...splitLines(stringField(args, 'old_string')).map(line => `-${line}`),
+    ...splitLines(stringField(args, 'new_string')).map(line => `+${line}`),
+  ]
+  return { path, added: false, ...diffCounts(rows), rows }
+}
+
+function splitLines(value: string | undefined): string[] {
+  return value === undefined || value === '' ? [] : value.replace(/\r?\n$/u, '').split(/\r?\n/u)
+}
+
+function diffCounts(rows: readonly string[]): { readonly plus: number; readonly minus: number } {
+  return {
+    plus: rows.filter(row => row.startsWith('+')).length,
+    minus: rows.filter(row => row.startsWith('-')).length,
+  }
+}
+
+function diffRows(rows: readonly string[], expanded: boolean, width: number): string[] {
+  const shown = expanded ? rows : rows.slice(0, DIFF_PREVIEW_ROWS)
+  const styled = shown.map(row => `${row.startsWith('+') ? GREEN : RED}${fit(row, width)}${RESET}`)
+  if (shown.length < rows.length) styled.push(`${DIM}${omittedRows(rows.length - shown.length)}${RESET}`)
+  return styled
+}
+
+function todoRow(todo: unknown, width: number): string[] {
+  if (typeof todo !== 'object' || todo === null) return []
+  const { content, status } = todo as { readonly content?: unknown; readonly status?: unknown }
+  if (typeof content !== 'string') return []
+  const mark = status === 'completed' ? `${GREEN}✔${RESET}` : status === 'in_progress' ? `${CYAN}□${RESET}` : `${DIM}□${RESET}`
+  const text = status === 'completed' ? `${DIM}${content}${RESET}` : content
+  const wrapped = wrapText(text, Math.max(1, width - 2))
+  return [`${mark} ${wrapped[0] ?? ''}`, ...wrapped.slice(1).map(line => `  ${line}`)]
 }
 
 function readSubject(item: TranscriptItem): string {
@@ -1152,18 +1381,6 @@ function searchSubject(item: TranscriptItem): string {
     if (typeof first === 'string') return first
   }
   return stringField(args, 'query') ?? item.text
-}
-
-function fetchSubject(item: TranscriptItem): string {
-  const args = parsedToolArguments(item)
-  const url = stringField(args, 'url')
-  if (url === undefined) return item.text
-  try {
-    return new URL(url).hostname
-  } catch (_invalidFetchUrl) {
-    // A malformed URL remains its literal text; fetch validation owns the failure.
-    return url
-  }
 }
 
 function subjectFromArguments(args: Readonly<Record<string, unknown>> | undefined): string {
@@ -1193,79 +1410,47 @@ function stringField(args: Readonly<Record<string, unknown>> | undefined, key: s
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
 }
 
-function countLines(value: string | undefined): number {
-  if (value === undefined) return 0
-  return value === '' ? 0 : value.split(/\r?\n/u).length
-}
-
 function combinedStatus(items: readonly TranscriptItem[]): ToolStatus {
   if (items.some(item => item.toolStatus === 'error')) return 'error'
   if (items.some(item => (item.toolStatus ?? 'ok') === 'running')) return 'running'
   return 'ok'
 }
 
-function statusPrefix(verb: string, status: ToolStatus): string {
-  return status === 'ok' ? verb : `${verb} · ${statusText(status)}`
+/**
+ * The running turn's one-line status, as codex's status indicator: the latest line of the
+ * model's reasoning (or `Working` before any), how long the turn has run, and how to stop it.
+ * @param state - the transcript.
+ * @param width - columns available.
+ * @param since - when the turn started, if known.
+ * @param now - the frame's clock.
+ * @returns one styled row.
+ */
+function statusIndicatorLine(state: TranscriptState, width: number, since: number | undefined, now: number): string {
+  const header = latestReasoningLine(state.items) ?? messages.working
+  const seconds = since === undefined ? 0 : Math.max(0, Math.floor((now - since) / 1000))
+  const elapsed = seconds < 60 ? `${String(seconds)}s` : `${String(Math.floor(seconds / 60))}m ${String(seconds % 60).padStart(2, '0')}s`
+  const tail = ` (${elapsed} • esc to interrupt)`
+  const room = Math.max(1, width - 2 - displayWidth(tail))
+  return `${YELLOW}•${RESET} ${BOLD}${fit(header, room)}${RESET}${DIM}${tail}${RESET}`
 }
 
-function statusText(status: ToolStatus): string {
-  return status === 'running' ? 'running' : status === 'error' ? 'failed' : 'ok'
-}
-
-function capitalize(value: string): string {
-  return value === '' ? value : `${value[0]?.toUpperCase() ?? ''}${value.slice(1)}`
-}
-
-function toolLines(item: TranscriptItem, expanded: boolean, width: number): string[] {
-  const status = item.toolStatus ?? (item.toolOutput === undefined ? 'running' : 'ok')
-  const statusText = status === 'running'
-    ? messages.toolRunning
-    : status === 'error' ? messages.toolFailed : messages.toolCompleted
-  const statusColor = status === 'running' ? YELLOW : status === 'error' ? RED : GREEN
-  const prefix = `${YELLOW}${messages.tool}:${item.title ?? messages.tool}${RESET} ${statusColor}[${statusText}]${RESET} `
-  const contentWidth = Math.max(8, width - displayWidth(prefix))
-  const summary = wrapText(item.text, contentWidth)
-  const lines = [`${prefix}${summary[0] ?? ''}`]
-  const indent = ' '.repeat(displayWidth(prefix))
-  for (const line of summary.slice(1)) lines.push(`${indent}${line}`)
-  if (expanded) {
-    if (item.toolArguments !== undefined && item.toolArguments.trim() !== '') {
-      lines.push(...labeledBlock(messages.toolArguments, item.toolArguments, width))
+/**
+ * The latest non-empty line of the current turn's reasoning, without Markdown heading or bold
+ * marks, as codex's `latest_summary_line`.
+ * @param items - the transcript items.
+ * @returns the line, or undefined when this turn has not reasoned yet.
+ */
+export function latestReasoningLine(items: readonly TranscriptItem[]): string | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item === undefined || item.kind === 'user') return undefined
+    if (item.kind !== 'reasoning') continue
+    for (const raw of item.text.split(/\r?\n/u).reverse()) {
+      const line = raw.trim().replace(/^#+\s*/u, '').replaceAll('**', '').trim()
+      if (line !== '' && !line.startsWith('<!--')) return line
     }
-    if (item.toolOutput !== undefined) {
-      lines.push(...labeledBlock(messages.toolOutput, item.toolOutput, width))
-    }
-  } else if (item.detail !== undefined) {
-    lines.push(`${indent}${DIM}${messages.expandTools}${RESET}`)
   }
-  return lines
-}
-
-function labeledBlock(label: string, value: string, width: number): string[] {
-  const prefix = `  ${DIM}${label}:${RESET} `
-  const contentWidth = Math.max(8, width - displayWidth(prefix))
-  const wrapped = wrapText(value, contentWidth)
-  return [
-    `${prefix}${wrapped[0] ?? ''}`,
-    ...wrapped.slice(1).map(line => `${' '.repeat(displayWidth(prefix))}${line}`),
-  ]
-}
-
-function itemPrefix(item: TranscriptItem): string {
-  switch (item.kind) {
-    case 'user':
-      return ''
-    case 'assistant':
-      return ''
-    case 'reasoning':
-      return `${DIM}${messages.thinking}${RESET} `
-    case 'tool':
-      return `${YELLOW}${messages.tool}:${item.title ?? messages.tool}${RESET} `
-    case 'error':
-      return `${RED}${messages.error}${RESET} `
-    case 'system':
-      return `${DIM}${messages.system}${RESET} `
-  }
+  return undefined
 }
 
 function queueDockLines(

@@ -183,6 +183,10 @@ export class TuiApp {
   private position: TranscriptPosition = LATEST
   /** The position a mouse press left, restored when the press turns out to be a plain click. */
   private positionBeforePress: TranscriptPosition | undefined
+  /** When the running turn started, for the status row's elapsed time. */
+  private runningSince: number | undefined
+  /** Repaints the status row's elapsed time once a second while a turn runs. */
+  private runningTicker: ReturnType<typeof setInterval> | undefined
   private readonly renderer = new TerminalRenderer()
   private readonly expandedTools = { value: false }
   private notice: string | undefined
@@ -1544,6 +1548,7 @@ export class TuiApp {
   private render(incremental: boolean): void {
     const suggestions = this.slashMenuOpen() ? this.visibleSlashSuggestions() : []
     if (this.slashIndex >= suggestions.length) this.slashIndex = 0
+    this.trackRunning()
     const frame = this.renderer.render({
       rows: this.stdout.rows,
       columns: this.stdout.columns,
@@ -1559,6 +1564,7 @@ export class TuiApp {
       expandedTools: this.expandedTools.value,
       scroll: this.position,
       holdPosition: this.selection !== undefined,
+      runningSince: this.runningSince,
       notice: this.notice,
       selection: this.selection,
     }, incremental)
@@ -1567,6 +1573,18 @@ export class TuiApp {
     // view reached the bottom.
     this.position = frame.position
     this.stdout.write(frame.paint)
+  }
+
+  /** Start the turn clock and its once-a-second repaint when a turn starts; stop both after. */
+  private trackRunning(): void {
+    if (this.state.running) {
+      this.runningSince ??= Date.now()
+      this.runningTicker ??= setInterval(() => { this.requestRender() }, 1000)
+      return
+    }
+    this.runningSince = undefined
+    if (this.runningTicker !== undefined) clearInterval(this.runningTicker)
+    this.runningTicker = undefined
   }
 
   /**
@@ -1776,6 +1794,8 @@ export class TuiApp {
     if (this.stopped) return
     this.stopped = true
     if (this.renderTimer !== undefined) clearTimeout(this.renderTimer)
+    if (this.runningTicker !== undefined) clearInterval(this.runningTicker)
+    this.runningTicker = undefined
     this.followAbort?.abort()
     process.off('SIGTERM', this.onSignal)
     process.off('SIGINT', this.onSignal)

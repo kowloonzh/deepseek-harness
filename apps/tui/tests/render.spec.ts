@@ -35,7 +35,7 @@ describe('terminal rendering', () => {
     expect(wrapText('中文abc', 5)).toEqual(['中文a', 'bc'])
   })
 
-  it('distinguishes roles with color and no copy-visible markers or labels', () => {
+  it('distinguishes roles with codex gutters and no role labels', () => {
     const state = initialTranscript()
     state.items = [
       { id: 'u', kind: 'user', text: 'hello' },
@@ -53,8 +53,9 @@ describe('terminal rendering', () => {
     expect(rendered).not.toContain('● reply')
     expect(rendered).not.toContain('You hello')
     expect(rendered).not.toContain('DSH reply')
-    expect(rendered.split('\n').find(line => line.includes('hello'))).toMatch(/^  › hello/u)
-    expect(rendered.split('\n').find(line => line.includes('reply'))).toMatch(/^  reply/u)
+    // codex's gutters start at the edge: `›` for the prompt, a dim `•` for each other cell.
+    expect(rendered.split('\n').find(line => line.includes('hello'))).toMatch(/^› hello/u)
+    expect(rendered.split('\n').find(line => line.includes('reply'))).toMatch(/^• reply/u)
   })
 
   it('renders the composer, status, and approval choices', () => {
@@ -218,28 +219,86 @@ describe('terminal rendering', () => {
       }
       return stripAnsi(renderView({ ...options, scroll: back === 0 ? LATEST : scrolledBack(options, back) }).text)
     }
+    // Collapsed: one codex card per call (reads fold into Explored), a diff or output preview
+    // hung under `└`, and never the raw arguments.
     const folded = frame(false)
-    expect(folded).toContain('Edited notes.md (+2 -1)')
-    expect(folded).toContain('Ran · failed false')
-    expect(folded).toContain('Read notes.md')
-    expect(folded).toContain('Searched web · running news')
-    expect(folded).toContain('Fetched 2 pages · failed')
-    expect(folded).toContain('+ Show details')
-    expect(folded).not.toContain('arguments:')
-    expect(folded).not.toContain('exit 1')
+    expect(folded).toContain('• Edited notes.md (+2 -1)')
+    expect(folded).toMatch(/└ -one\n\s+\+one\n\s+\+two/u)
+    expect(folded).toMatch(/• Ran false\n\s+└ permission denied\n\s+exit 1/u)
+    expect(folded).toMatch(/• Explored\n\s+└ Read notes\.md/u)
+    expect(folded).toContain('• Searching news')
+    expect(folded).toContain('• Opened https://a.test/one')
+    expect(folded).toMatch(/• Opened https:\/\/b\.test\/two\n\s+└ two/u)
+    expect(folded).not.toContain('arguments')
+    expect(folded).not.toContain('{"')
 
+    // Expanded: the same cards with every call's output, still without raw arguments.
     const expanded = frame(true)
-    expect(expanded).toContain('tool:edit [ok] path: notes.md')
-    expect(expanded).toContain('tool:bash [failed] command: false')
-    expect(expanded).toContain('arguments: {"command":"false"}')
-    expect(expanded).toContain('output: permission denied')
-    expect(expanded).toContain('exit 1')
-    expect(expanded).toContain('tool:web_fetch')
-    expect(expanded).not.toContain('+ Show details')
+    expect(expanded).toMatch(/└ Read notes\.md\n\s+notes/u)
+    expect(expanded).toMatch(/• Opened https:\/\/a\.test\/one\n\s+└ one/u)
+    expect(expanded).not.toContain('{"')
 
     const scrolled = frame(false, 3)
-    expect(scrolled).toContain('web_search running')
+    expect(scrolled).toContain('Searching news')
     expect(scrolled).toContain('↓ bottom · Esc')
+  })
+
+  it('keeps reasoning out of the conversation and shows its latest line in the status row', () => {
+    const state = initialTranscript()
+    state.running = true
+    state.items = [
+      { id: 'u', kind: 'user', text: 'fix it' },
+      { id: 'r', kind: 'reasoning', text: '**Reading the renderer**\n\nLooking at wrapText next.\n' },
+    ]
+    const options = {
+      rows: 24, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, scroll: LATEST, notice: undefined, runningSince: 1_000, now: 76_000,
+    }
+    const collapsed = stripAnsi(renderView({ ...options, expandedTools: false }).text)
+    expect(collapsed).not.toContain('Reading the renderer')
+    expect(collapsed).toMatch(/• Looking at wrapText next\. \(1m 15s • esc to interrupt\)\n╭/u)
+    const expanded = stripAnsi(renderView({ ...options, expandedTools: true }).text)
+    expect(expanded).toMatch(/• Reading the renderer\n\s*\n?\s*Looking at wrapText next\./u)
+
+    // A new prompt starts a turn that has not reasoned yet.
+    state.items = [...state.items, { id: 'u2', kind: 'user', text: 'again' }]
+    expect(stripAnsi(renderView({ ...options, expandedTools: false }).text)).toContain('• Working (1m 15s • esc to interrupt)')
+    state.running = false
+    expect(stripAnsi(renderView({ ...options, expandedTools: false }).text)).not.toContain('esc to interrupt')
+  })
+
+  it('previews long command output by its head and tail', () => {
+    const state = initialTranscript()
+    state.items = [{
+      id: 't', kind: 'tool', title: 'bash', text: '', toolStatus: 'ok',
+      toolArguments: JSON.stringify({ command: 'seq 20' }),
+      toolOutput: Array.from({ length: 20 }, (_, i) => `n${String(i + 1)}`).join('\n'),
+    }]
+    const render = (expandedTools: boolean) => stripAnsi(renderView({
+      rows: 40, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools, scroll: LATEST, notice: undefined,
+    }).text)
+    expect(render(false)).toMatch(/• Ran seq 20\n  └ n1\n    n2\n    … \+16 lines \(Ctrl\+O\)\n    n19\n    n20/u)
+    expect(render(true)).toContain('    n10')
+    expect(render(true)).not.toContain('… +')
+  })
+
+  it('summarizes patches and plans from their arguments', () => {
+    const state = initialTranscript()
+    const patch = ['*** Begin Patch', '*** Update File: a.ts', '@@', '-old', '+new', '+more', '*** End Patch'].join('\n')
+    state.items = [
+      { id: 'p', kind: 'tool', title: 'apply_patch', text: '', toolStatus: 'ok', toolArguments: JSON.stringify({ input: patch }), toolOutput: 'ok' },
+      {
+        id: 'todo', kind: 'tool', title: 'todo_write', text: '', toolStatus: 'ok', toolOutput: 'ok',
+        toolArguments: JSON.stringify({ todos: [{ content: 'read', status: 'completed' }, { content: 'fix', status: 'pending' }] }),
+      },
+    ]
+    const rendered = stripAnsi(renderView({
+      rows: 30, columns: 80, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
+    }).text)
+    expect(rendered).toMatch(/• Edited a\.ts \(\+2 -1\)\n  └ -old\n    \+new\n    \+more/u)
+    expect(rendered).toMatch(/• Updated Plan\n  └ ✔ read\n    □ fix/u)
   })
 
   it('renders slash command and skill completion above the composer', () => {
@@ -352,8 +411,9 @@ describe('terminal rendering', () => {
     expect(rendered).toContain('• 第一项')
     expect(rendered).toContain('项   │')
     expect(rendered).toContain('状态 │ open')
-    expect(rendered).toContain('go')
-    expect(rendered).toContain('fmt.Println("ok")')
+    // codex prints the code alone, indented, without the fence's language tag.
+    expect(rendered).toMatch(/^  fmt\.Println\("ok"\)$/mu)
+    expect(rendered).not.toMatch(/^go$/mu)
     expect(rendered).not.toContain('##')
     expect(rendered).not.toContain('**')
     expect(rendered).not.toContain('`code`')
