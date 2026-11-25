@@ -5,7 +5,8 @@
  * The TUI writes the entry at each launch. The profile reloads its patch live, so a Host that is
  * already running picks up the plugin, and one started later loads it with the profile. Writing is
  * idempotent: the entry lives between two marker lines the TUI owns, is left alone when current,
- * and is rewritten in place when the plugin moved. Nothing outside the markers is touched.
+ * and has its plugin path rewritten in place when the plugin moved. Nothing else is touched,
+ * including a `config:` the operator added inside the markers.
  */
 
 import { existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
@@ -83,9 +84,13 @@ export function withEntry(text: string, pluginPath: string): { readonly text?: s
   }
   // A half-removed block was edited by hand: leave the file to the operator.
   if (begin < 0 || end < begin) return { outcome: 'skipped' }
-  const current = `${lines.slice(begin, end + 1).join('\n')}\n`
-  if (current === block) return { outcome: 'unchanged' }
-  const next = [...lines.slice(0, begin), ...block.slice(0, -1).split('\n'), ...lines.slice(end + 1)].join('\n')
+  // Inside the block only the plugin path is ours: a `config:` the operator added stays.
+  const body = lines.slice(begin + 1, end)
+  const at = body.findIndex(line => /^\s+name:/u.test(line))
+  if (at < 0 || !body.some(line => line.trim() === `- id: ${NEXT_PROMPT_COMMAND}`)) return { outcome: 'skipped' }
+  const nameLine = `${/^\s*/u.exec(body[at] ?? '')?.[0] ?? ''}name: ${JSON.stringify(pluginPath)}`
+  if (body[at] === nameLine) return { outcome: 'unchanged' }
+  const next = [...lines.slice(0, begin + 1 + at), nameLine, ...lines.slice(begin + 2 + at)].join('\n')
   return { text: next, outcome: 'updated' }
 }
 

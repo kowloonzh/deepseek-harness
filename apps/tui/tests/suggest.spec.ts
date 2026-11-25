@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ensureNextPromptEntry, entryBlock, webProfilePatchPath, withEntry } from '../src/suggest.ts'
-import { suggestionFromOutput, transcriptText } from '../src/host/next-prompt.ts'
+import { Config, suggestionFromOutput, transcriptText } from '../src/host/next-prompt.ts'
 
 const EXISTING = '# operator notes\n- id: llm-pi-ai # magpie\n  config:\n    key: kept\n'
 const homes: string[] = []
@@ -37,6 +37,17 @@ describe('next-prompt profile entry', () => {
     expect(readdirSync(join(path, '..')).filter(name => name.endsWith('.tui-tmp'))).toEqual([])
   })
 
+  it('keeps a config the operator added inside the block', () => {
+    const configured = entryBlock('/old/next-prompt.js').replace(
+      'next-prompt.js"\n',
+      'next-prompt.js"\n      config:\n        maxTokens: 80\n',
+    )
+    const { env, path } = profileHome(`${EXISTING}${configured}`)
+    expect(ensureNextPromptEntry('/old/next-prompt.js', undefined, env)).toBe('unchanged')
+    expect(ensureNextPromptEntry('/new/next-prompt.js', undefined, env)).toBe('updated')
+    expect(readFileSync(path, 'utf8')).toBe(`${EXISTING}${configured.replace('/old/', '/new/')}`)
+  })
+
   it('rewrites only its own block when the plugin moved', () => {
     const { env, path } = profileHome(`${EXISTING}${entryBlock('/old/next-prompt.js')}- id: after\n  disabled: true\n`)
     expect(ensureNextPromptEntry('/new/next-prompt.js', undefined, env)).toBe('updated')
@@ -61,11 +72,22 @@ describe('next-prompt profile entry', () => {
   })
 })
 
+describe('next-prompt plugin config', () => {
+  it('fills defaults and rejects a half route or a bad bound', () => {
+    expect(Config['~standard'].validate(undefined)).toEqual({ value: { maxTokens: 200, timeoutMs: 30_000, maxTranscriptChars: 12_000 } })
+    expect(Config['~standard'].validate({ provider: 'p', model: 'm', maxTokens: 80 })).toMatchObject({
+      value: { provider: 'p', model: 'm', maxTokens: 80, timeoutMs: 30_000 },
+    })
+    expect(Config['~standard'].validate({ provider: 'p' })).toMatchObject({ issues: [{ path: ['model'] }] })
+    expect(Config['~standard'].validate({ timeoutMs: -1 })).toMatchObject({ issues: [{ path: ['timeoutMs'] }] })
+  })
+})
+
 describe('next-prompt plugin text', () => {
   it('keeps the newest conversation text within its bound', () => {
     const text = transcriptText([
       { role: 'user', content: [{ type: 'text', text: 'old' }] },
-      { role: 'tool', content: [{ type: 'text', text: 'skipped' }] },
+      { role: 'tool', content: [{ type: 'text', text: 'skipped' }] } as never,
       { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(20_000) }, { type: 'text', text: 'Want me to sort?' }] },
     ])
     expect(text.length).toBe(12_000)
