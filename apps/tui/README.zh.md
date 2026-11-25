@@ -174,6 +174,27 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 
 Enter 把消息交给正在运行的东西：运行中的回合会在下一个步骤边界读到它，空闲时它会开启新回合。Ctrl+Enter 会先中断该回合，Esc 只负责停止——有浮层时关闭浮层，否则中断回合。Alt+Up 把交给运行中回合的那条消息召回，可在边界到来前修改；Shift+Enter 插入换行，Tab 用于补全斜杠菜单或草稿。`/queue` 支持编辑和删除仍在等待该边界的消息。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
 
+## 工单清单
+
+勾选的是本分支已完成的工作，未勾选的是已知的后续事项。
+
+- [x] 对话记录按 codex 风格的 history cell 绘制：Markdown、代码块高亮、表格中的 OSC 8 链接，以及着色的工具卡片。
+- [x] 通过 cell grid 绘制 inline viewport，窗口尺寸变化后整屏重绘，并过滤不可信的控制字符和 OSC 序列。
+- [x] 输入框按键：Enter 发送（运行中的轮次在下一个 step 读取），Ctrl+Enter 中断并发送，Esc 中断，Esc Esc 回溯，Alt+Up 召回，大段粘贴折叠为占位符。
+- [x] 待发送区和 `/queue`；Host 自己排入的消息（例如后台任务完成）显示为 `notice:`，不再当成 steer。
+- [x] `!` 开头的行作为一次性 shell 命令运行。
+- [x] 斜杠补全覆盖本地命令、Host 命令和 skill，并支持 `@path` 补全。
+- [x] `/model` 同时选择模型和推理强度。
+- [x] 状态行显示模型、cwd、上下文、缓存命中率和 magpie 订阅额度。
+- [x] 轮次结束或等待输入时发送桌面通知并更新窗口标题。
+- [x] Host 就绪前先打开界面，期间输入的消息在会话建立后发送。
+- [x] `/exit` 先中断运行中的轮次再退出。
+- [x] 可以通过 `DSH_URL` 复用常驻 Host。
+- [x] 下一条输入建议：空输入框中灰显模型的猜测，按 Tab 填入；TUI 每次启动时幂等地在 Web profile patch 中维护其 Host 插件条目，`DSH_TUI_SUGGEST=off` 可关闭。
+- [x] 标题和对话之间留一个空行。
+- [ ] Web 前端仍会显示 TUI 已隐藏的 `tui-next-prompt` 命令记录（不在 `apps/tui` 范围内）。
+- [ ] 把建议插件移到 bundle 中的独立包，改用 Remote 服务或 projection 而不是 Host 命令。
+
 ## Herdr
 
 在 Herdr pane 中，`dsh tui` 以 `dsh` 的名称上报 `idle`、`working` 或 `blocked` 状态；审批和用户提问上报 `blocked`。当 `HERDR_ENV=1` 时，上报使用继承的 `HERDR_BIN_PATH`、`HERDR_PANE_ID` 和 `HERDR_SOCKET_PATH`。上报异步执行并设有较短超时，退出时释放 pane 中的 agent 注册。Herdr 0.9.0 支持状态上报；对于本地启动的 host，0.9.2 及以上版本还会接收 `dsh tui --resume <session-id>`。通过 `DSH_URL` 建立的连接会上报状态和会话标识，但不会持久化带 token 的 URL 或恢复命令。参见 [Herdr agent 集成协议](https://herdr.dev/docs/add-herdr-support/)。

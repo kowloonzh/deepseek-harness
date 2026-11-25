@@ -187,6 +187,27 @@ User messages render as a full-width shaded block while assistant text stays on 
 
 Enter sends the message to whatever is running: a running turn reads it at its next step boundary, and an idle one starts a turn with it. Ctrl+Enter interrupts that turn first, and Esc only stops things — it closes the open overlay, and otherwise interrupts the turn. Alt+Up recalls the message handed to the running turn so it can be edited before that boundary, Shift+Enter inserts a newline, and Tab completes the slash menu or the draft. `/queue` provides edit and remove actions for the messages awaiting that boundary. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
 
+## Work items
+
+Checked items are done on this branch; unchecked ones are known follow-ups.
+
+- [x] Transcript drawn as codex-style history cells: Markdown, highlighted code fences, OSC 8 links in tables, and colored tool cards.
+- [x] Inline viewport painted through a cell grid, repainted whole after a resize, with untrusted control and OSC sequences stripped.
+- [x] Composer keys: Enter sends (a running turn reads it at its next step), Ctrl+Enter interrupts and sends, Esc interrupts, Esc Esc backtracks, Alt+Up recalls, and large pastes fold into placeholders.
+- [x] Queue dock and `/queue`; messages the Host queues itself, such as a finished background job, show as `notice:` instead of a steer.
+- [x] `!` lines run as one-shot shell commands.
+- [x] Slash completion for local commands, Host commands, and skills, plus `@path` completion.
+- [x] `/model` chooses the model together with its reasoning effort.
+- [x] Status row with model, cwd, context, cache share, and the magpie subscription allowance.
+- [x] Desktop notification and window title when a turn ends or waits for input.
+- [x] The screen opens before the Host is ready, and a prompt typed meanwhile is sent once the Session exists.
+- [x] `/exit` interrupts a running turn before leaving.
+- [x] A resident Host can be reused through `DSH_URL`.
+- [x] Next-prompt suggestion: a dim guess in the empty composer that Tab takes; the TUI keeps its Host plugin entry in the Web profile patch at each launch, idempotently, and `DSH_TUI_SUGGEST=off` turns it off.
+- [x] A blank row between the title and the conversation.
+- [ ] The Web frontend still lists the `tui-next-prompt` command records the TUI hides (outside `apps/tui`).
+- [ ] Move the suggestion plugin into its own package in a bundle, reached through a Remote service or a projection instead of a Host command.
+
 ## Herdr
 
 Inside a Herdr pane, `dsh tui` reports itself as `dsh` with `idle`, `working`, or `blocked` status; approvals and user questions report `blocked`. Reports use the inherited `HERDR_BIN_PATH`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH` when `HERDR_ENV=1`. They run asynchronously with a short timeout, and exiting releases the pane's agent registration. Herdr 0.9.0 supports status reporting; 0.9.2 or later also receives `dsh tui --resume <session-id>` for locally started hosts. Connections supplied through `DSH_URL` report status and session identity without persisting a tokenized URL or a restore command. See [Herdr's agent integration protocol](https://herdr.dev/docs/add-herdr-support/).
