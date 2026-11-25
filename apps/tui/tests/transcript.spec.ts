@@ -316,4 +316,20 @@ describe('terminal transcript projection', () => {
     expect(state.items.map(item => item.kind)).toEqual(['tool', 'turn', 'assistant', 'assistant'])
     expect(state.items[1]).toMatchObject({ kind: 'turn', elapsedMs: 65_000 })
   })
+  it('appends a tool result whose call is missing instead of replacing the transcript', () => {
+    let state = applyFollowFrame(initialTranscript(), {
+      type: 'event',
+      event: { type: 'user/message', seq: 1, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] } },
+    } as never)
+    state = applyFollowFrame(state, {
+      type: 'event',
+      event: {
+        type: 'tool/result', seq: 2, time: 2,
+        data: { message: { role: 'tool', source: { callId: 'gone' }, content: [{ type: 'text', text: 'orphan' }] } },
+      },
+    } as never)
+    expect(state.items.map(item => item.kind)).toEqual(['user', 'tool'])
+    expect(state.items[0]).toMatchObject({ text: 'hello' })
+    expect(state.items[1]).toMatchObject({ id: 'tool-result-2', toolOutput: 'orphan', toolStatus: 'ok' })
+  })
 })

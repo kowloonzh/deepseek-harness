@@ -413,7 +413,9 @@ function applyEvent(
       }
       return next
     }
-    return [{
+    // A result whose call is not in view (a snapshot cut between them) joins the transcript
+    // as its own row; it must not replace everything shown so far.
+    return [...items, {
       id: `tool-result-${String(event.seq)}`,
       kind: 'tool',
       title: 'tool result',
