@@ -29,6 +29,7 @@ import {
   turnCompleteMessage,
   type NotificationMethod,
 } from './terminal-signals.ts'
+import { magpieProvider, readMagpieQuota, type QuotaWindow } from './quota.ts'
 import { TuiError } from './error.ts'
 import {
   cacheHitPercent,
@@ -242,6 +243,14 @@ export class TuiApp {
   private readonly env: NodeJS.ProcessEnv
   /** Whether the last report saw a running turn, to notice the moment it ends. */
   private wasRunning = false
+  /** Allowance windows of the magpie subscription serving the model, as last read. */
+  private quota: QuotaWindow[] = []
+  /** The magpie provider `quota` belongs to. */
+  private quotaProvider: string | undefined
+  private quotaTimer: ReturnType<typeof setInterval> | undefined
+  private quotaReading = false
+  /** No `magpie` command on this machine. */
+  private quotaMissing = false
   /** The approval or question already announced, so each one notifies once. */
   private announcedInteraction: unknown
   private titleFrame = 0
@@ -1765,6 +1774,9 @@ export class TuiApp {
    */
   private reportActivity(interaction: ApprovalPrompt | QuestionPrompt | Overlay | undefined): void {
     const running = this.state.running
+    const provider = magpieProvider(this.state.model)
+    // A turn's end is when the allowance moved; a model change may switch subscriptions.
+    if (provider !== this.quotaProvider || (this.wasRunning && !running)) this.refreshQuota(provider)
     if (this.wasRunning && !running) {
       const sinceUser = this.state.items.slice(this.state.items.findLastIndex(item => item.kind === 'user') + 1)
       this.notify(turnCompleteMessage(sinceUser.findLast(item => item.kind === 'assistant')?.text))
@@ -1779,6 +1791,37 @@ export class TuiApp {
     }
     this.announcedInteraction = interaction
     this.updateTitle(interaction !== undefined)
+  }
+
+  /**
+   * Re-read the allowance of the magpie subscription behind the model, in the background.
+   * @param provider - magpie's provider id, or undefined when the model is not served by magpie.
+   */
+  private refreshQuota(provider: string | undefined): void {
+    if (provider !== this.quotaProvider) this.quota = []
+    this.quotaProvider = provider
+    if (provider === undefined) {
+      if (this.quotaTimer !== undefined) clearInterval(this.quotaTimer)
+      this.quotaTimer = undefined
+      return
+    }
+    // Without magpie on this machine there is nothing to read: stop asking.
+    if (this.quotaMissing) return
+    // Windows also move with other agents' use of the same subscription.
+    this.quotaTimer ??= setInterval(() => { this.refreshQuota(this.quotaProvider) }, 60_000)
+    if (this.quotaReading) return
+    this.quotaReading = true
+    void readMagpieQuota(provider).then((reading) => {
+      this.quotaReading = false
+      if (reading.missing) {
+        this.quotaMissing = true
+        if (this.quotaTimer !== undefined) clearInterval(this.quotaTimer)
+        this.quotaTimer = undefined
+      }
+      if (this.stopped || provider !== this.quotaProvider) return
+      this.quota = reading.windows
+      this.requestRender()
+    })
   }
 
   /**
@@ -1850,6 +1893,7 @@ export class TuiApp {
       holdPosition: this.selection !== undefined,
       runningSince: this.runningSince,
       highlightItem: this.backtrackItemId(),
+      quota: this.quota,
       notice: this.notice,
       selection: this.selection,
     }, incremental)
@@ -2093,6 +2137,8 @@ export class TuiApp {
     this.runningTicker = undefined
     if (this.titleTicker !== undefined) clearInterval(this.titleTicker)
     this.titleTicker = undefined
+    if (this.quotaTimer !== undefined) clearInterval(this.quotaTimer)
+    this.quotaTimer = undefined
     this.followAbort?.abort()
     process.off('SIGTERM', this.onSignal)
     process.off('SIGINT', this.onSignal)

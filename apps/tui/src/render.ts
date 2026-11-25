@@ -12,6 +12,7 @@ import type {
 } from './ui.ts'
 import type { ClipboardImage } from './clipboard.ts'
 import { highlightCode, highlightCommand } from './highlight.ts'
+import { formatQuota, type QuotaWindow } from './quota.ts'
 import { messages } from './locale.ts'
 import type {
   TranscriptItem,
@@ -174,6 +175,8 @@ export interface RenderViewOptions {
   readonly selection?: TerminalSelection | undefined
   /** The user message a backtrack selection points at, drawn highlighted. */
   readonly highlightItem?: string | undefined
+  /** Allowance windows of the subscription serving the model, when known. */
+  readonly quota?: readonly QuotaWindow[] | undefined
 }
 
 /**
@@ -354,7 +357,7 @@ export class TerminalRenderer {
       if (row < shown.length) shown[row] = ''
     }
 
-    const status = statusLine(options.state, width, options.notice, position.kind === 'reading')
+    const status = statusLine(options.state, width, options.notice, position.kind === 'reading', options.quota ?? [], options.now ?? Date.now())
     const lines = [
       fitAnsi(header, width),
       ...conversation,
@@ -1571,9 +1574,11 @@ function statusLine(
   fullWidth: number,
   notice: string | undefined,
   reading: boolean,
+  quota: readonly QuotaWindow[],
+  now: number,
 ): string {
-  if (fullWidth <= STATUS_INDENT.length) return statusRow(state, fullWidth, notice, reading)
-  return `${STATUS_INDENT}${statusRow(state, fullWidth - STATUS_INDENT.length, notice, reading)}`
+  if (fullWidth <= STATUS_INDENT.length) return statusRow(state, fullWidth, notice, reading, quota, now)
+  return `${STATUS_INDENT}${statusRow(state, fullWidth - STATUS_INDENT.length, notice, reading, quota, now)}`
 }
 
 function statusRow(
@@ -1581,7 +1586,11 @@ function statusRow(
   width: number,
   notice: string | undefined,
   reading: boolean,
+  quota: readonly QuotaWindow[],
+  now: number,
 ): string {
+  const allowance = formatQuota(quota, now)
+  const lowest = Math.min(...quota.map(window => window.remaining))
   const model = state.model === undefined
     ? messages.defaultModel
     : `${state.model.model}${state.model.reasoningEffort === undefined ? '' : ` ${state.model.reasoningEffort}`}`
@@ -1595,6 +1604,8 @@ function statusRow(
     { text: shortenHome(state.cwd), style: GREEN, shrinks: true },
     ...(context === undefined ? [] : [{ text: context, style: GREEN }]),
     ...(cache === undefined ? [] : [{ text: `cache ${String(cache)}%`, style: GREEN }]),
+    // Subscription allowance left, yellow once a window runs low and red when nearly gone.
+    ...(allowance === undefined ? [] : [{ text: allowance, style: lowest < 5 ? RED : lowest < 20 ? YELLOW : GREEN }]),
     // The run state is one paired reading: showing only the running half made an idle
     // terminal look like a frame that had failed to paint its tail.
     { text: state.running ? messages.running : messages.idle, style: state.running ? CYAN : DIM },
