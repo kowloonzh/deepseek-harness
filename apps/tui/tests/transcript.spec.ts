@@ -360,4 +360,17 @@ describe('terminal transcript projection', () => {
     // Only the text of a pending message is known, so an attachment would be dropped.
     expect(steerResend([first, prompt('i', 'steering', 'shot', false)])).toEqual({ kind: 'attachments' })
   })
+
+  it('leaves the TUI\'s own suggestion command out of the transcript', () => {
+    const event = (seq: number, type: string, data: unknown): SessionFollowFrame =>
+      ({ type: 'event', event: { type, seq, time: seq, data } }) as unknown as SessionFollowFrame
+    let state = { ...initialTranscript(), sessionId }
+    for (const frame of [
+      event(1, 'command/run', { commandId: 'cmd-1', name: 'tui-next-prompt', source: 'user' }),
+      event(2, 'command/done', { commandId: 'cmd-1', kind: 'success', text: 'sort them' }),
+      event(3, 'command/run', { commandId: 'cmd-2', name: 'status', source: 'user' }),
+      event(4, 'command/done', { commandId: 'cmd-2', kind: 'success', text: 'all good' }),
+    ]) state = applyFollowFrame(state, frame)
+    expect(state.items.map(item => item.text)).toEqual(['all good'])
+  })
 })

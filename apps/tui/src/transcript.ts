@@ -10,6 +10,7 @@ import type {
   SessionQueuedItem,
   SessionState,
 } from '@deepseek-ai/dsh-api-session-controller/types'
+import { NEXT_PROMPT_COMMAND } from './suggest.ts'
 
 /** Kinds rendered in the terminal conversation. */
 export type TranscriptKind = 'user' | 'assistant' | 'reasoning' | 'tool' | 'system' | 'error' | 'turn'
@@ -110,6 +111,8 @@ export interface TranscriptState {
    * input out entirely instead of carrying it over as a pending message.
    */
   turnBoundarySeq?: number | undefined
+  /** Ids of command runs the TUI makes for itself, whose results stay out of the transcript. */
+  hiddenCommands?: readonly string[] | undefined
 }
 
 /** Create an empty transcript. */
@@ -129,7 +132,10 @@ export function applySnapshot(state: TranscriptState, frame: Extract<SessionFoll
     liveReasoningId: undefined,
     turnBoundarySeq: undefined,
   }
+  next.hiddenCommands = undefined
   for (const record of frame.records) {
+    next.hiddenCommands = hiddenAfter(next.hiddenCommands, record.event)
+    if (isHidden(next.hiddenCommands, record.event)) continue
     next.items = applyEvent(next.items, record.event, next.turnBoundarySeq)
     next.turnBoundarySeq = boundaryAfter(next.turnBoundarySeq, record.event)
   }
@@ -141,10 +147,12 @@ export function applyFollowFrame(state: TranscriptState, frame: SessionFollowFra
   if (frame.type === 'snapshot') return applySnapshot(state, frame)
   if (frame.type === 'event') {
     const running = runningAfterEvent(state.running, frame.event.type, frame.event.data)
+    const hiddenCommands = hiddenAfter(state.hiddenCommands, frame.event)
     return {
       ...state,
       running,
-      items: applyEvent(state.items, frame.event, state.turnBoundarySeq),
+      hiddenCommands,
+      items: isHidden(hiddenCommands, frame.event) ? state.items : applyEvent(state.items, frame.event, state.turnBoundarySeq),
       turnBoundarySeq: boundaryAfter(state.turnBoundarySeq, frame.event),
     }
   }
@@ -519,6 +527,29 @@ function boundaryAfter(
     if (Array.isArray(inserted) && inserted.length > 0) return event.seq - 1
   }
   return boundary
+}
+
+/** Command names whose runs the TUI makes for itself. */
+const INTERNAL_COMMANDS: ReadonlySet<string> = new Set([NEXT_PROMPT_COMMAND])
+const HIDDEN_COMMANDS_KEPT = 16
+
+/** Remember the id of an internal command run, so its `command/done` can be left out. */
+function hiddenAfter(
+  hidden: readonly string[] | undefined,
+  event: { readonly type: string; readonly data: unknown },
+): readonly string[] | undefined {
+  if (event.type !== 'command/run') return hidden
+  const data = recordValue(event.data)
+  const name = stringValue(data?.name)
+  const id = stringValue(data?.commandId)
+  if (name === undefined || id === undefined || !INTERNAL_COMMANDS.has(name)) return hidden
+  return [...(hidden ?? []), id].slice(-HIDDEN_COMMANDS_KEPT)
+}
+
+function isHidden(hidden: readonly string[] | undefined, event: { readonly type: string; readonly data: unknown }): boolean {
+  if (hidden === undefined || (event.type !== 'command/run' && event.type !== 'command/done')) return false
+  const id = stringValue(recordValue(event.data)?.commandId)
+  return id !== undefined && hidden.includes(id)
 }
 
 function runningAfterEvent(running: boolean, type: string, data: unknown): boolean {

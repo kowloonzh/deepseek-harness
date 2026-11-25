@@ -264,4 +264,71 @@ describe('terminal prompt lifecycle', () => {
       await host.close()
     }
   }, 30_000)
+
+  it('offers the Host\'s guess at the next message after a turn, and Tab takes it', async () => {
+    const host = await launchWebScaffold({ compareReplaySession: false })
+    const input = new PassThrough()
+    const output = new PassThrough()
+    const stdin = input as NodeJS.ReadStream
+    const stdout = output as NodeJS.WriteStream
+    stdin.setRawMode = () => stdin
+    stdout.rows = 24
+    stdout.columns = 100
+    let text = ''
+    output.on('data', (chunk: Buffer) => { text += chunk.toString() })
+    let app: TuiApp | undefined
+    const remote = await TuiRemoteClient.connect({
+      ...normalizeEntryUrl(host.authenticatedUrl), close: async () => {},
+    }, {
+      approval: request => app?.requestApproval(request) ?? Promise.resolve('rejected'),
+      question: request => app?.requestQuestion(request) ?? Promise.resolve({ answers: [] }),
+      sessionStatus: (id, running) => { app?.setRunning(id, running) },
+      sessionError: (id, message) => { app?.remoteError(id, message) },
+    })
+    const lines: string[] = []
+    remote.listCommands = async () => [
+      { name: 'goal', description: 'Set the session goal' },
+      { name: 'tui-next-prompt', description: 'internal' },
+    ]
+    remote.command = async (_id, line) => {
+      lines.push(line)
+      return { commandId: 'cmd-1', result: { kind: 'success', text: 'sort them by count' } } as never
+    }
+    const sessionId = await remote.createSession(host.workspaceCwd)
+    const running = TuiApp.run({
+      remote, hostClose: async () => {}, resume: sessionId, stdin, stdout, env: {},
+      onApp: (value) => { app = value },
+    })
+    const frame = (): string => (app?.screenLines() ?? []).join('\n')
+      .replaceAll(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+    try {
+      await expect.poll(() => text).toContain('deepseek-v4-flash')
+      input.write('/')
+      await expect.poll(frame).toContain('/help Show commands')
+      input.write('\u0015')
+      input.write('/go')
+      await expect.poll(frame).toContain('/goal Set the session goal')
+      input.write('\u0015')
+      input.write('/tui')
+      await expect.poll(() => draftText(app)).toBe('/tui')
+      expect(frame()).not.toContain('tui-next-prompt')
+      input.write('\u0015')
+      app?.setRunning(sessionId, true)
+      await expect.poll(frame).toContain('Working')
+      app?.setRunning(sessionId, false)
+      await expect.poll(frame).toContain('❯ sort them by count')
+      expect(lines).toEqual(['/tui-next-prompt'])
+      input.write('\t')
+      await expect.poll(() => draftText(app)).toBe('sort them by count')
+      input.write('\u0015')
+      await expect.poll(() => draftText(app)).toBe('')
+      expect(frame()).not.toContain('sort them by count')
+    } finally {
+      input.write('\u0003/quit\r')
+      await running
+      input.destroy()
+      output.destroy()
+      await host.close()
+    }
+  }, 30_000)
 })

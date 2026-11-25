@@ -177,6 +177,8 @@ export interface RenderViewOptions {
   readonly highlightItem?: string | undefined
   /** Allowance windows of the subscription serving the model, when known. */
   readonly quota?: readonly QuotaWindow[] | undefined
+  /** A suggested next message, drawn dim in an empty composer; Tab takes it. */
+  readonly placeholder?: string | undefined
 }
 
 /**
@@ -307,7 +309,14 @@ export class TerminalRenderer {
 
     // Bottom pane: the composer first (two border rows around at least one inner row), then
     // whatever fits above it — an open view, or else the queue dock.
-    const composer = composerLines(options.input, options.cursor, options.images ?? [], width, Math.max(1, paneRows - 2))
+    const composer = composerLines(
+      options.input,
+      options.cursor,
+      options.images ?? [],
+      width,
+      Math.max(1, paneRows - 2),
+      options.placeholder,
+    )
     const above = Math.max(0, paneRows - composer.lines.length)
     const indicator = options.overlay === undefined && options.state.running && above > 0
       ? [statusIndicatorLine(options.state, width, options.runningSince, options.now ?? Date.now())]
@@ -1665,6 +1674,7 @@ function composerLines(
   images: readonly ClipboardImage[],
   width: number,
   maxInnerRows: number,
+  placeholder?: string,
 ): {
   readonly lines: string[]
   readonly cursorLine: number
@@ -1695,6 +1705,10 @@ function composerLines(
     }),
   ]
   while (innerRows.length < 1) innerRows.push(boxContent(' ', '', width))
+  if (input === '' && images.length === 0 && placeholder !== undefined && placeholder !== '') {
+    // The cursor stays at the start: the suggestion is not text in the composer until Tab.
+    innerRows[0] = boxContent(`${CYAN}❯${RESET}`, `${DIM}${fit(placeholder, contentWidth)}${RESET}`, width)
+  }
   const cursorInnerLine = visibleChipRows.length + cursorPosition.line - start
   const lines = [
     borderedLabel('╭', '╮', '', width),

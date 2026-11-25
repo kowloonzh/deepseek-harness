@@ -8,6 +8,7 @@ import {
   type WebHost,
 } from './host.ts'
 import { TuiRemoteClient } from './remote.ts'
+import { bundledPluginPath, ensureNextPromptEntry, SUGGEST_ENV } from './suggest.ts'
 
 /** Inputs supplied by the CLI launcher and overridable by tests. */
 export interface RunTuiOptions {
@@ -60,6 +61,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
   let app: TuiApp | undefined
   try {
     const configured = (options.env ?? process.env).DSH_URL
+    ensureSuggestions(options.env ?? process.env, configured)
     // The host starts and connects behind the first frame instead of in front of it.
     const connecting = (async () => {
       host = configured === undefined || configured.trim() === ''
@@ -120,3 +122,30 @@ function requireEntrypoint(): string {
 }
 
 export { TuiError } from './error.ts'
+
+/**
+ * Keep the Web profile loading the next-prompt plugin, for a Host on this machine. A failure
+ * only costs the suggestions, so it never stops the TUI.
+ * @param env - launcher environment.
+ * @param configured - the DSH_URL in use, if any.
+ */
+function ensureSuggestions(env: NodeJS.ProcessEnv, configured: string | undefined): void {
+  if (env[SUGGEST_ENV] === 'off') return
+  if (configured !== undefined && configured.trim() !== '' && !isLoopback(configured)) return
+  const plugin = bundledPluginPath()
+  if (plugin === undefined) return
+  try {
+    ensureNextPromptEntry(plugin, undefined, env)
+  } catch {
+    // The profile stays as it was; the TUI runs without suggestions.
+  }
+}
+
+function isLoopback(url: string): boolean {
+  try {
+    const { hostname } = new URL(url)
+    return hostname === 'localhost' || hostname === '[::1]' || hostname.startsWith('127.')
+  } catch {
+    return false
+  }
+}

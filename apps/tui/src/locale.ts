@@ -27,6 +27,7 @@ export const messages = {
     'Esc               interrupt the running turn, or close the open overlay',
     'Shift+Enter       insert a newline instead of sending',
     'Alt+Up            recall the message handed to the running turn for editing',
+    'Tab               take the suggested next message shown in an empty composer',
   ].join('\n'),
   approvals: 'Approval required',
   allowOnce: 'Enter allow once',

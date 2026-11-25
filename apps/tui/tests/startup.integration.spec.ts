@@ -140,7 +140,10 @@ describe('terminal exit', () => {
       try {
         await host.close()
       } catch (error) {
-        if (!String(error).includes('fixture not fully consumed')) throw error
+        // Teardown gathers its failures; only the expected one is let through.
+        const failures = error instanceof AggregateError ? error.errors : [error]
+        const unexpected = failures.filter(failure => !String(failure).includes('fixture not fully consumed'))
+        if (unexpected.length > 0) throw error
       }
     }
   }, 60_000)

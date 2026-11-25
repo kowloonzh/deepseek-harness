@@ -30,6 +30,7 @@ import {
   type NotificationMethod,
 } from './terminal-signals.ts'
 import { magpieProvider, readMagpieQuota, type QuotaWindow } from './quota.ts'
+import { NEXT_PROMPT_COMMAND, SUGGEST_ENV } from './suggest.ts'
 import { TuiError } from './error.ts'
 import {
   cacheHitPercent,
@@ -250,6 +251,10 @@ export class TuiApp {
   private readonly env: NodeJS.ProcessEnv
   /** Whether the last report saw a running turn, to notice the moment it ends. */
   private wasRunning = false
+  /** The model's guess at the next message, for the Session it was made in. */
+  private suggestion: { readonly sessionId: SessionId; readonly text: string } | undefined
+  /** Bumped whenever a pending guess goes stale, so a late answer is dropped. */
+  private suggestionRequest = 0
   /** Allowance windows of the magpie subscription serving the model, as last read. */
   private quota: QuotaWindow[] = []
   /** The magpie provider `quota` belongs to. */
@@ -712,6 +717,7 @@ export class TuiApp {
       return
     }
     if (key.name === 'tab') {
+      if (this.takeSuggestion()) return
       this.completeInput()
       return
     }
@@ -1651,6 +1657,7 @@ export class TuiApp {
       const merged = new Map(this.localSlashSuggestions().map(item => [item.name, item]))
       if (commands.status === 'fulfilled') {
         for (const command of commands.value) {
+          if (command.name === NEXT_PROMPT_COMMAND) continue
           if (!merged.has(command.name)) {
             merged.set(command.name, {
               name: command.name,
@@ -1805,6 +1812,53 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /**
+   * Ask the Host for a guess at the next message, now that a turn ended. The guess comes from
+   * the plugin the TUI keeps in the Web profile; without it the command does not resolve and
+   * nothing shows.
+   */
+  private requestSuggestion(): void {
+    const sessionId = this.state.sessionId
+    if (sessionId === undefined || this.env[SUGGEST_ENV] === 'off') return
+    this.dropSuggestion()
+    const request = this.suggestionRequest
+    void this.remote.command(sessionId, `/${NEXT_PROMPT_COMMAND}`).then((execution) => {
+      if (request !== this.suggestionRequest || this.state.sessionId !== sessionId || this.state.running) return
+      const text = execution?.result.kind === 'success' ? execution.result.text?.trim() ?? '' : ''
+      if (text === '') return
+      this.suggestion = { sessionId, text }
+      this.requestRender()
+    }, () => {
+      // A guess that failed is simply not shown.
+    })
+  }
+
+  private dropSuggestion(): void {
+    this.suggestionRequest++
+    if (this.suggestion === undefined) return
+    this.suggestion = undefined
+    this.requestRender()
+  }
+
+  /** The guess to draw in the composer: only for this Session, when nothing else is there. */
+  private shownSuggestion(): string | undefined {
+    const suggestion = this.suggestion
+    if (suggestion === undefined || suggestion.sessionId !== this.state.sessionId) return undefined
+    if (this.state.running || this.overlay !== undefined || this.submission !== undefined) return undefined
+    if (this.input !== '' || this.draftImages.length > 0) return undefined
+    return suggestion.text
+  }
+
+  /** Tab on an empty composer: put the shown guess in it, to send or edit. */
+  private takeSuggestion(): boolean {
+    const text = this.shownSuggestion()
+    if (text === undefined) return false
+    this.suggestion = undefined
+    this.editor.setText(text)
+    this.requestRender()
+    return true
+  }
+
   private completeInput(): void {
     if (this.input.startsWith('/') && !this.input.includes(' ')) {
       // The catalog carries local commands, Host commands, and skills; a skill or Host
@@ -1874,6 +1928,8 @@ export class TuiApp {
     const provider = magpieProvider(this.state.model)
     // A turn's end is when the allowance moved; a model change may switch subscriptions.
     if (provider !== this.quotaProvider || (this.wasRunning && !running)) this.refreshQuota(provider)
+    if (running) this.dropSuggestion()
+    else if (this.wasRunning) this.requestSuggestion()
     if (this.wasRunning && !running) {
       const sinceUser = this.state.items.slice(this.state.items.findLastIndex(item => item.kind === 'user') + 1)
       this.notify(turnCompleteMessage(sinceUser.findLast(item => item.kind === 'assistant')?.text))
@@ -1985,6 +2041,7 @@ export class TuiApp {
       quota: this.quota,
       notice: this.notice,
       selection: this.selection,
+      placeholder: this.shownSuggestion(),
     }, incremental)
     this.lastFrame = frame
     // The resolved position: re-anchored to the row now on top, or back to Latest once the

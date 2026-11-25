@@ -940,6 +940,18 @@ describe('terminal rendering', () => {
     }
     expect(offenders).toEqual([])
   })
+
+  it('draws a suggestion dim in an empty composer only', () => {
+    const options = {
+      rows: 12, columns: 60, state: initialTranscript(), cursor: 0, overlay: undefined, expandedTools: false,
+      scroll: LATEST, notice: undefined,
+    } as const
+    const empty = renderView({ ...options, input: '', placeholder: 'sort them by count' }).text
+    expect(stripAnsi(empty)).toMatch(/❯ sort them by count\s*│/u)
+    expect(empty).toContain('\u001b[2msort them by count')
+    const typed = stripAnsi(renderView({ ...options, input: 'no', cursor: 2, placeholder: 'sort them by count' }).text)
+    expect(typed).not.toContain('sort them by count')
+  })
 })
 
 function stripAnsi(value: string): string {
