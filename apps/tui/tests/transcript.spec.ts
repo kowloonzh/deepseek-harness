@@ -297,4 +297,23 @@ describe('terminal transcript projection', () => {
     expect(state.title).toBe('Restored')
     expect(state.items).toEqual([{ id: 'user-1', kind: 'user', text: 'restored' }])
   })
+  it('keeps a Worked for marker above the final answer of a turn that ran tools', () => {
+    const events: Array<{ type: string; time: number; data: unknown }> = [
+      { type: 'turn/start', time: 1_000, data: { turn: 1 } },
+      { type: 'tool/call', time: 2_000, data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } },
+      { type: 'tool/result', time: 3_000, data: { turn: 1, step: 1, message: { role: 'tool', source: { callId: 'c1' }, content: [{ type: 'text', text: 'a' }] } } },
+      { type: 'assistant/message', time: 4_000, data: { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } } },
+      { type: 'turn/end', time: 66_000, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'turn/start', time: 70_000, data: { turn: 2 } },
+      { type: 'assistant/message', time: 71_000, data: { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } } },
+      { type: 'turn/end', time: 72_000, data: { turn: 2, reason: { kind: 'completed' } } },
+    ]
+    let state = initialTranscript()
+    for (const [seq, event] of events.entries()) {
+      state = applyFollowFrame(state, { type: 'event', event: { ...event, seq: seq + 1 } } as never)
+    }
+    // Only the turn with tools keeps its marker, placed between the work and the answer.
+    expect(state.items.map(item => item.kind)).toEqual(['tool', 'turn', 'assistant', 'assistant'])
+    expect(state.items[1]).toMatchObject({ kind: 'turn', elapsedMs: 65_000 })
+  })
 })

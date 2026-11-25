@@ -12,7 +12,7 @@ import type {
 } from '@deepseek-ai/dsh-api-session-controller/types'
 
 /** Kinds rendered in the terminal conversation. */
-export type TranscriptKind = 'user' | 'assistant' | 'reasoning' | 'tool' | 'system' | 'error'
+export type TranscriptKind = 'user' | 'assistant' | 'reasoning' | 'tool' | 'system' | 'error' | 'turn'
 
 /** Terminal-visible lifecycle of one tool call. */
 export type ToolStatus = 'running' | 'ok' | 'error'
@@ -28,6 +28,13 @@ export interface TranscriptItem {
   toolArguments?: string | undefined
   toolOutput?: string | undefined
   transient?: boolean | undefined
+  /**
+   * A `turn` marker's start time in epoch milliseconds. The marker is invisible while the turn
+   * runs; when it ends, a turn that used tools keeps it as codex's `Worked for` separator.
+   */
+  startedAt?: number | undefined
+  /** How long a finished turn ran, in milliseconds; set only on a kept `turn` marker. */
+  elapsedMs?: number | undefined
 }
 
 /** Token counters shown in the status line. */
@@ -334,8 +341,12 @@ function appendLive(
 
 function applyEvent(
   items: TranscriptItem[],
-  event: { readonly type: string; readonly seq: number; readonly data: unknown },
+  event: { readonly type: string; readonly seq: number; readonly time?: number; readonly data: unknown },
 ): TranscriptItem[] {
+  if (event.type === 'turn/start') {
+    return [...items, { id: `turn-${String(event.seq)}`, kind: 'turn', text: '', startedAt: event.time }]
+  }
+  if (event.type === 'turn/end') return endTurn(items, event.time)
   const data = recordValue(event.data)
   if (data === undefined) return items
   if (event.type === 'user/message') {
@@ -419,6 +430,28 @@ function applyEvent(
     return [...items, { id: `command-${String(event.seq)}`, kind: kind === 'error' ? 'error' : 'system', text }]
   }
   return items
+}
+
+/**
+ * Settle the open turn marker, as codex's final-message separator: a turn that ran tools keeps
+ * it just above its final answer, so the answer stands apart from the work; a turn that only
+ * talked drops it.
+ * @param items - the transcript, holding the marker `turn/start` added.
+ * @param time - when the turn ended, in epoch milliseconds.
+ * @returns the transcript with the marker placed or removed.
+ */
+function endTurn(items: TranscriptItem[], time: number | undefined): TranscriptItem[] {
+  const start = items.findLastIndex(item => item.kind === 'turn' && item.elapsedMs === undefined)
+  const marker = items[start]
+  if (marker === undefined) return items
+  const next = [...items.slice(0, start), ...items.slice(start + 1)]
+  const turn = next.slice(start)
+  const lastTool = turn.findLastIndex(item => item.kind === 'tool')
+  if (lastTool < 0 || marker.startedAt === undefined || time === undefined) return next
+  const answer = turn.findLastIndex(item => item.kind === 'assistant')
+  const at = start + (answer > lastTool ? answer : turn.length)
+  next.splice(at, 0, { ...marker, elapsedMs: Math.max(0, time - marker.startedAt) })
+  return next
 }
 
 function runningAfterEvent(running: boolean, type: string, data: unknown): boolean {

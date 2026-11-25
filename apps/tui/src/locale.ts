@@ -44,6 +44,7 @@ export const messages = {
   you: 'You',
   assistant: 'DSH',
   working: 'Working',
+  workedFor: (elapsed: string): string => `Worked for ${elapsed}`,
   idle: 'idle',
   running: 'running',
   defaultModel: 'model: default',

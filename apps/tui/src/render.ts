@@ -11,6 +11,7 @@ import type {
   SlashSuggestion,
 } from './ui.ts'
 import type { ClipboardImage } from './clipboard.ts'
+import { highlightCode } from './highlight.ts'
 import { messages } from './locale.ts'
 import type {
   TranscriptItem,
@@ -558,6 +559,12 @@ function transcriptLines(
     // Reasoning stays out of the conversation, as in codex: its latest line rides in the
     // bottom pane while the turn runs, and Ctrl+O brings the full text back.
     if (item.kind === 'reasoning' && !expandedTools) continue
+    if (item.kind === 'turn') {
+      if (item.elapsedMs === undefined) continue
+      lines.push(workedSeparator(item.elapsedMs, width), '')
+      claim(item.id)
+      continue
+    }
     lines.push(...cellLines(item, width), '')
     claim(item.id)
   }
@@ -588,6 +595,30 @@ function cellLines(item: TranscriptItem, width: number): string[] {
     default:
       return gutter(wrapText(item.text, inner).map(row => `${DIM}${row}${RESET}`), `${DIM}•${RESET} `)
   }
+}
+
+/**
+ * codex's final-message separator: `─ Worked for 1m 05s ───…` across the row, dim.
+ * @param elapsedMs - how long the turn ran.
+ * @param width - columns to fill.
+ * @returns the separator row.
+ */
+function workedSeparator(elapsedMs: number, width: number): string {
+  const label = `─ ${messages.workedFor(compactElapsed(Math.floor(elapsedMs / 1000)))} `
+  const fitted = fit(label, width)
+  return `${DIM}${fitted}${'─'.repeat(Math.max(0, width - displayWidth(fitted)))}${RESET}`
+}
+
+/**
+ * Elapsed time as codex's `fmt_elapsed_compact`: `45s`, `1m 05s`, `1h 02m 05s`.
+ * @param seconds - whole seconds.
+ * @returns the compact form.
+ */
+function compactElapsed(seconds: number): string {
+  if (seconds < 60) return `${String(seconds)}s`
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  if (seconds < 3600) return `${String(Math.floor(seconds / 60))}m ${pad(seconds % 60)}s`
+  return `${String(Math.floor(seconds / 3600))}h ${pad(Math.floor(seconds / 60) % 60)}m ${pad(seconds % 60)}s`
 }
 
 function gutter(rows: readonly string[], bullet: string): string[] {
@@ -884,9 +915,16 @@ function formatStyledLine(chars: readonly StyledChar[]): string {
 }
 
 function codeBlockLines(code: Tokens.Code, width: number): string[] {
-  // codex prints the code alone, indented, without the fence's language tag.
+  // codex prints the code alone, indented, without the fence's language tag, colored by it.
   const lines: string[] = []
-  for (const line of code.text.split('\n')) lines.push(...wrapText(`  ${line}`, width))
+  // Tabs would otherwise sanitize to one space and flatten indented code.
+  for (const spans of highlightCode(code.text.replaceAll('\t', '    '), code.lang)) {
+    const chars: StyledChar[] = [{ char: ' ', style: '' }, { char: ' ', style: '' }]
+    for (const span of spans) {
+      for (const char of Array.from(sanitize(span.text))) chars.push({ char, style: span.style })
+    }
+    lines.push(...wrapStyled(chars, width))
+  }
   return lines
 }
 
@@ -1428,8 +1466,7 @@ function combinedStatus(items: readonly TranscriptItem[]): ToolStatus {
 function statusIndicatorLine(state: TranscriptState, width: number, since: number | undefined, now: number): string {
   const header = latestReasoningLine(state.items) ?? messages.working
   const seconds = since === undefined ? 0 : Math.max(0, Math.floor((now - since) / 1000))
-  const elapsed = seconds < 60 ? `${String(seconds)}s` : `${String(Math.floor(seconds / 60))}m ${String(seconds % 60).padStart(2, '0')}s`
-  const tail = ` (${elapsed} • esc to interrupt)`
+  const tail = ` (${compactElapsed(seconds)} • esc to interrupt)`
   const room = Math.max(1, width - 2 - displayWidth(tail))
   return `${YELLOW}•${RESET} ${BOLD}${fit(header, room)}${RESET}${DIM}${tail}${RESET}`
 }
@@ -1512,15 +1549,15 @@ function statusLine(
   // slowly, and keeping them here crowded out the two readings that move during work.
   const cache = cacheHitPercent(state.tokens)
   const cacheReading = cache === undefined ? '' : ` | cache ${String(cache)}%`
-  const activeTool = state.items.findLast(item => item.kind === 'tool' && item.toolStatus === 'running')
-  const activity = activeTool === undefined ? '' : ` | ${activeTool.title ?? messages.tool} running`
+  // The running tool shows in its own card and the status indicator; repeating it here only
+  // crowded the row.
   const bottom = reading ? ' | ↓ bottom · Esc' : ''
   // The run state is one paired reading: showing only the running half made an idle
   // terminal look like a frame that had failed to paint its tail.
   const runState = ` | ${state.running ? messages.running : messages.idle}`
-  const base = `${cwd} | ${model}${context}${cacheReading}${activity}${runState}${bottom}`
+  const base = `${cwd} | ${model}${context}${cacheReading}${runState}${bottom}`
   if (bottom !== '' && (notice === undefined || notice === '')) {
-    const tail = `${activity}${bottom}`
+    const tail = bottom
     const head = `${cwd} | ${model}${context}${cacheReading}`
     return `${DIM}${fit(head, Math.max(1, width - displayWidth(tail)))}${tail}${RESET}`
   }

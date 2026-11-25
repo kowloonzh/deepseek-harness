@@ -31,6 +31,42 @@ const suggest = (count: number): SlashSuggestion[] =>
   Array.from({ length: count }, (_, i) => ({ name: `cmd${i}`, description: 'd', source: 'command' }))
 
 describe('terminal rendering', () => {
+  it('colors fenced code by its language and leaves unknown fences plain', () => {
+    const lines = renderMarkdownLines('```ts\nconst a = "x" // note\n```\n\n```\nconst b\n```', 60)
+    const code = lines.find(line => stripAnsi(line).includes('const a')) ?? ''
+    expect(stripAnsi(code)).toBe('  const a = "x" // note')
+    expect(code).toContain('\u001b[35mconst')
+    expect(code).toContain('\u001b[32m"x"')
+    expect(code).toContain('\u001b[2m// note')
+    const plain = lines.find(line => stripAnsi(line).includes('const b')) ?? ''
+    expect(plain).toBe('  const b')
+  })
+
+  it('separates a finished turn that used tools with a Worked for row, and keeps tools off the status row', () => {
+    const state = initialTranscript()
+    state.running = true
+    state.items = [
+      { id: 'u', kind: 'user', text: 'go' },
+      { id: 't', kind: 'tool', title: 'bash', text: '', toolArguments: '{"command":"sleep 9"}', toolStatus: 'running' },
+      { id: 'turn', kind: 'turn', text: '', startedAt: 0 },
+    ]
+    const options = { rows: 20, columns: 50, input: '', cursor: 0, overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined } as const
+    const running = stripAnsi(renderView({ ...options, state }).text)
+    expect(running).not.toContain('Worked for')
+    expect(running).not.toContain('bash running')
+    state.running = false
+    state.items = [
+      ...state.items.slice(0, 2).map(item => ({ ...item, toolStatus: 'ok' as const, toolOutput: '' })),
+      { id: 'turn', kind: 'turn', text: '', startedAt: 0, elapsedMs: 65_400 },
+      { id: 'a', kind: 'assistant', text: 'done' },
+    ]
+    const rows = stripAnsi(renderView({ ...options, state }).text).split('\n')
+    const separator = rows.findIndex(row => row.startsWith('─ Worked for 1m 05s ─'))
+    expect(separator).toBeGreaterThan(rows.findIndex(row => row.startsWith('• Ran sleep 9')))
+    expect(rows[separator]).toMatch(/^─ Worked for 1m 05s ─{20,}$/u)
+    expect(rows.findIndex(row => row.startsWith('• done'))).toBeGreaterThan(separator)
+  })
+
   it('wraps CJK text by terminal cells', () => {
     expect(wrapText('中文abc', 5)).toEqual(['中文a', 'bc'])
   })
