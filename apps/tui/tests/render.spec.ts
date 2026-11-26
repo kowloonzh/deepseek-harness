@@ -891,7 +891,13 @@ describe('terminal rendering', () => {
     const controlRow = stripAnsi(reading.text).split(/\r?\n/u)[(control?.row ?? 0) - 1] ?? ''
     expect(controlRow.trim()).toBe('↓ Back to bottom · esc')
     expect(controlRow.slice((control?.start ?? 0) - 1, control?.end).trim()).toBe('↓ Back to bottom · esc')
+    // The status row carries no reading hint of its own: the control is the way back.
     expect(stripAnsi(reading.text)).not.toContain('↓ bottom · Esc')
+    const selecting = renderer.render({
+      ...options, scroll: back, selection: { anchor: { column: 3, row: 3 }, head: { column: 9, row: 3 }, dragging: true },
+    })
+    expect(selecting.followControl).toBeUndefined()
+    expect(stripAnsi(selecting.text)).not.toMatch(/bottom/iu)
     expect(latest.followControl).toBeUndefined()
     expect(stripAnsi(latest.text)).not.toContain('Back to bottom')
     // A terminal too narrow for the long label gets a shorter one.

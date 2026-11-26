@@ -402,14 +402,7 @@ export class TerminalRenderer {
         followControl = { row: headerHeight + conversation.length, start: left + 1, end: left + labelWidth }
       }
     }
-    const status = statusLine(
-      options.state,
-      width,
-      options.notice,
-      position.kind === 'reading' && followControl === undefined,
-      options.quota ?? [],
-      options.now ?? Date.now(),
-    )
+    const status = statusLine(options.state, width, options.notice, options.quota ?? [], options.now ?? Date.now())
     const lines = [
       fitAnsi(header, width),
       ...Array.from({ length: headerHeight - 1 }, () => ''),
@@ -1639,19 +1632,17 @@ function statusLine(
   state: TranscriptState,
   fullWidth: number,
   notice: string | undefined,
-  reading: boolean,
   quota: readonly QuotaWindow[],
   now: number,
 ): string {
-  if (fullWidth <= STATUS_INDENT.length) return statusRow(state, fullWidth, notice, reading, quota, now)
-  return `${STATUS_INDENT}${statusRow(state, fullWidth - STATUS_INDENT.length, notice, reading, quota, now)}`
+  if (fullWidth <= STATUS_INDENT.length) return statusRow(state, fullWidth, notice, quota, now)
+  return `${STATUS_INDENT}${statusRow(state, fullWidth - STATUS_INDENT.length, notice, quota, now)}`
 }
 
 function statusRow(
   state: TranscriptState,
   width: number,
   notice: string | undefined,
-  reading: boolean,
   quota: readonly QuotaWindow[],
   now: number,
 ): string {
@@ -1676,7 +1667,6 @@ function statusRow(
     ...(activity === undefined ? [] : [{ text: activity, style: GREEN, drops: true }]),
     // Subscription allowance left, yellow once a window runs low and red when nearly gone.
     ...(allowance === undefined ? [] : [{ text: allowance, style: lowest < 5 ? RED : lowest < 20 ? YELLOW : GREEN }]),
-    ...(reading ? [{ text: messages.readingHint, style: DIM }] : []),
   ]
   if (notice === undefined || notice === '') return statusSegments(segments, width)
   const noticeWidth = displayWidth(notice)
