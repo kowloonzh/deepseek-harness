@@ -153,12 +153,11 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 - 命令和 `@path` 补全；
 - 工具审批和 `ask_user_question`；
 - 连续工具调用分组显示数量、名称和 running/failed 状态，Ctrl+O 展开每个工具的完整参数与输出；
-- 显示工作目录、模型、reasoning effort、上下文、token、权限和运行状态的紧凑状态栏。
+- 显示模型、reasoning effort、工作目录、上下文、缓存命中率、订阅额度和运行状态的紧凑状态栏；token 总量和权限模式在 `/status` 中查看。
 
 状态栏在首次发送前显示 web profile 的默认模型，并跟随 host 实时更新的模型选择、token 用量和执行状态。已提交提示词的确认响应不会把已结束的轮次重新标为运行中。
 
-指针选择、主题、通知、侧面板、会话树、分叉、
-工作树和其他 agent 后端暂不在功能范围内。
+主题、侧面板、会话树、工作树和其他 agent 后端暂不在功能范围内。
 
 `Ctrl+U`、`Ctrl+K`、`Ctrl+W` 和 `Ctrl+Y` 采用 readline 的 kill/yank 操作。
 `Shift+Enter` 插入换行。`Ctrl+V` 优先读取图片，未找到图片时回退到
@@ -172,7 +171,7 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 
 用户消息使用整行底色块，助手正文保持普通背景。界面不渲染可见角色标记，终端原生选择复制时只包含消息正文。
 
-Enter 把消息交给正在运行的东西：运行中的回合会在下一个步骤边界读到它，空闲时它会开启新回合。Ctrl+Enter 会先中断该回合，Esc 只负责停止——有浮层时关闭浮层，否则中断回合。Alt+Up 把交给运行中回合的那条消息召回，可在边界到来前修改；Shift+Enter 插入换行，Tab 用于补全斜杠菜单或草稿。`/queue` 支持编辑和删除仍在等待该边界的消息。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
+Enter 把消息交给正在运行的东西：运行中的回合会在下一个步骤边界读到它，空闲时它会开启新回合。Ctrl+Enter 会先中断该回合，Esc 只负责停止——有浮层时关闭浮层，否则中断回合，并把仍在等待步骤边界的 steer 消息立即作为新回合发出。输入框为空且空闲时连按两次 Esc 进入回溯：用 Esc/上/下选择更早的消息，按 Enter 从该消息分叉会话。Alt+Up 把交给运行中回合的那条消息召回，可在边界到来前修改；Shift+Enter 插入换行，Tab 用于补全斜杠菜单或草稿，或填入空输入框中显示的下一条输入建议。`/queue` 支持编辑和删除仍在等待该边界的消息。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
 
 ## 工单清单
 

@@ -166,12 +166,12 @@ The first version implements:
 - command and `@path` completion;
 - tool approvals and `ask_user_question`;
 - grouped tool runs showing counts, names, and running/failed status, with each tool's arguments and output under Ctrl+O;
-- a compact status line with cwd, model, reasoning effort, context, tokens, permission, and run state.
+- a compact status line with model, reasoning effort, cwd, context, cache share, subscription allowance, and run state; token totals and the permission mode are in `/status`.
 
 The status line shows the web profile's default model before the first prompt and follows live model-selection, token-usage, and execution-state updates from the host. A submitted prompt's acknowledgement does not mark a completed turn as running.
 
-Pointer selection, themes, notifications, side panels, session trees, forks,
-worktrees, and alternate agent backends are intentionally out of scope.
+Themes, side panels, session trees, worktrees, and alternate agent backends are
+intentionally out of scope.
 
 `Ctrl+U`, `Ctrl+K`, `Ctrl+W`, and `Ctrl+Y` follow readline kill/yank behavior.
 `Shift+Enter` inserts a newline. `Ctrl+V` reads an image first, then falls back to
@@ -185,7 +185,7 @@ The mouse wheel scrolls the conversation transcript. Up/Down remain prompt histo
 
 User messages render as a full-width shaded block while assistant text stays on the normal background. No visible role markers are added, so terminal-native selection copies only the message text.
 
-Enter sends the message to whatever is running: a running turn reads it at its next step boundary, and an idle one starts a turn with it. Ctrl+Enter interrupts that turn first, and Esc only stops things — it closes the open overlay, and otherwise interrupts the turn. Alt+Up recalls the message handed to the running turn so it can be edited before that boundary, Shift+Enter inserts a newline, and Tab completes the slash menu or the draft. `/queue` provides edit and remove actions for the messages awaiting that boundary. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
+Enter sends the message to whatever is running: a running turn reads it at its next step boundary, and an idle one starts a turn with it. Ctrl+Enter interrupts that turn first, and Esc only stops things — it closes the open overlay, and otherwise interrupts the turn, sending at once as a new turn any steer messages still waiting for a step boundary. On an idle, empty composer, Esc twice opens backtrack: pick an earlier message with Esc/Up/Down and press Enter to fork the Session from it. Alt+Up recalls the message handed to the running turn so it can be edited before that boundary, Shift+Enter inserts a newline, and Tab completes the slash menu or the draft, or takes the suggested next message shown in an empty composer. `/queue` provides edit and remove actions for the messages awaiting that boundary. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
 
 ## Work items
 
