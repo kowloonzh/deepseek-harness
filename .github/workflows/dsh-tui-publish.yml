@@ -1,0 +1,79 @@
+# Publish the standalone `@kowloonzh/dsh-tui` npm package (apps/tui) from this fork.
+#
+# Not an upstream workflow: it lives only on the fork's `feat/dsh-tui-profile` branch, and
+# `apps/tui/tests/fork-boundary.spec.ts` allows exactly this file under .github/.
+#
+# Release: bump `release` in apps/tui/standalone/package.json (or sync onto a new Host
+# version), commit, push, then push the tag `dsh-tui-v<version>`, for example
+# `dsh-tui-v0.2.3-alpha.2.tui.2`. The job packs, installs the tarball into an empty directory
+# and starts it, and only then publishes.
+#
+# No npm token: npm trusts this workflow through OIDC (Trusted Publishing, configured on the
+# package's npm settings page for kowloonzh/deepseek-harness and `dsh-tui-publish.yml`), and
+# the publish carries a provenance attestation. A manual run packs and verifies but never
+# publishes.
+
+name: dsh-tui publish
+
+on:
+  push:
+    tags: ['dsh-tui-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-tui-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'kowloonzh/deepseek-harness'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write   # OIDC for npm Trusted Publishing and provenance
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '^24.22.3'   # ships npm 11.x, which Trusted Publishing needs (>= 11.5.1)
+      - uses: pnpm/action-setup@v5.0.0
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Compile the workspace packages the TUI bundles
+        run: pnpm run typecheck   # Typert, then Host and Client declarations and JS; no bundles
+      - name: Unit-test the standalone packaging
+        run: pnpm exec vitest run apps/tui/tests/standalone.spec.ts
+      - name: Pack
+        id: pack
+        run: |
+          pnpm --filter @deepseek-ai/dsh-tui-app run pack:standalone
+          tarball=$(ls dist/standalone/*.tgz)
+          version=$(jq -r .version dist/standalone/package/package.json)
+          echo "tarball=$GITHUB_WORKSPACE/$tarball" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Packed @kowloonzh/dsh-tui@$version" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check the tag names the packed version
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          if [ "$TAG" != "dsh-tui-v$VERSION" ]; then
+            echo "::error::tag $TAG does not match the packed version; expected dsh-tui-v$VERSION"
+            exit 1
+          fi
+      - name: Install the tarball into an empty directory and start it
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: pnpm --filter @deepseek-ai/dsh-tui-app run verify:standalone "$TARBALL"
+      - name: Publish to npm
+        if: github.event_name == 'push'
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm publish "$TARBALL" --access public --tag latest
