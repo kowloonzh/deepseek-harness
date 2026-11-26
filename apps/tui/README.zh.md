@@ -97,6 +97,9 @@ pnpm run build:artifacts    # the integration tests run against built lib/ and d
 # 2. Rebase the TUI branch onto it.
 git checkout feat/dsh-tui-profile
 git rebase master
+# 让 TUI 包版本跟上发版版本；不一致时测试会失败。
+(cd apps/tui && npm pkg set version="$(jq -r .version ../../package.json)")
+git commit -m "chore(tui): follow the upstream release version" apps/tui/package.json   # only when it changed
 
 # 3. Publish the rebased branch and move the baseline tag.
 git push --force-with-lease origin feat/dsh-tui-profile
@@ -120,6 +123,49 @@ pnpm --filter @deepseek-ai/dsh-tui-app run bundle
 
 测试通过 tsconfig paths 直接读 `src/`，不需要这一步，所以测试全绿并不代表运行中的终端
 已经用上了改动。
+
+### 独立 npm 包
+
+同一份构建也以 `@kowloonzh/dsh-tui` 发布到公开 npm registry，供只想使用 TUI 的人安装。
+它提供 `dsh-tui` 命令，并依赖精确版本的 `@deepseek-ai/dsh`，由后者启动 Host：
+
+```sh
+npm install -g @kowloonzh/dsh-tui
+dsh-tui
+```
+
+workspace 中的包仍是 `dsh tui` 背后的 `@deepseek-ai/dsh-tui-app`，因此本分支依然可以 rebase
+到 upstream。`apps/tui/standalone/` 存放发布包自己的 `package.json` 与 `README.md`；
+`scripts/pack-standalone.ts` 根据构建产物组装发布包：
+
+```sh
+pnpm --filter @deepseek-ai/dsh-tui-app run pack:standalone   # dist/standalone/kowloonzh-dsh-tui-<version>.tgz
+```
+
+脚本自动推导依赖而不是照抄：bundle 中残留的每个裸 import 都成为依赖，workspace 包固定为当前检出的精确版本，
+`@deepseek-ai/dsh` 固定为 `apps/cli` 的版本。通过 `alwaysBundle` 打进 bundle 的包不算依赖，因此 npm 上尚未发布的
+upstream 包（例如 `@deepseek-ai/dsh-typert-registry`）可以这样使用。遇到 `apps/tui/package.json` 未声明的 import
+或私有 workspace 包时，打包会失败。
+
+只在 upstream 基线是已发布 `@deepseek-ai/dsh` 版本的提交上发布。`.github/workflows/dsh-tui-publish.yml`
+通过 npm Trusted Publishing 在 GitHub Actions 中发布，不需要 npm 登录、2FA 确认或 token：
+
+```sh
+# 测试通过后：提高 apps/tui/standalone/package.json 中的 `release`，提交并推送
+pnpm --filter @deepseek-ai/dsh-tui-app run pack:standalone
+v=$(jq -r .version dist/standalone/package/package.json)
+git tag "dsh-tui-v$v" && git push origin "dsh-tui-v$v"
+```
+
+该 job 先编译 workspace（`pnpm run typecheck`），再打包；tag 与打包版本不一致时拒绝发布；随后在空目录中安装
+tarball 并启动 `dsh-tui`（`verify:standalone`），全部通过后才发布，并附带 provenance 证明。手动运行该
+workflow 只打包和验证，不发布。
+
+版本号是锁定的 Host 版本后面加 `tui.<release>`：正式版 `0.2.3` 得到 `0.2.3-tui.<release>`；预发布版
+`0.2.3-alpha.2` 已经带有 `-`，因此得到 `0.2.3-alpha.2.tui.<release>`。两者都紧排在对应 Host 版本之后、
+下一个 Host 版本之前；`0.2.3-alpha.2-tui.1` 则不行，semver 会把 `2-tui` 当成一个标识符，排到 `alpha.3` 之后。
+只有 `standalone/package.json` 里的 `release` 需要手动维护：同一 Host 上只改 TUI 时加 1，Host 版本变化时重置为 1。
+这些版本都属于 semver 预发布版本，因此发布时要显式加 `--tag latest`；`^0.2.3` 这样的范围也不会选中它们。
 
 ### 为某个 Node 版本注册 `dsh`
 

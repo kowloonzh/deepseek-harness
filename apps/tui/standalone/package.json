@@ -1,0 +1,37 @@
+{
+  "name": "@kowloonzh/dsh-tui",
+  "//version": "Derived when packing: the pinned @deepseek-ai/dsh version plus `release` (0.2.3 -> 0.2.3-tui.<release>, 0.2.3-alpha.2 -> 0.2.3-alpha.2.tui.<release>). Bump `release` for a TUI-only release; reset it to 1 when the Host version changes.",
+  "release": 2,
+  "description": "Unofficial codex-style terminal frontend for DeepSeek Harness, running on the web profile Host",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "tui",
+    "terminal"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kowloonzh/deepseek-harness.git",
+    "directory": "apps/tui"
+  },
+  "homepage": "https://github.com/kowloonzh/deepseek-harness/tree/feat/dsh-tui-profile/apps/tui#readme",
+  "bugs": "https://github.com/kowloonzh/deepseek-harness/issues",
+  "type": "module",
+  "bin": {
+    "dsh-tui": "bin/dsh-tui.js"
+  },
+  "files": [
+    "bin/dsh-tui.js",
+    "lib/index.js",
+    "lib/host/next-prompt.js",
+    "overlays",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

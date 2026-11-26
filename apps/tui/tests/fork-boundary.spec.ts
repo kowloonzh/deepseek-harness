@@ -1,6 +1,7 @@
 /** Keep the local TUI feature isolated from upstream source trees. */
 
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -26,6 +27,7 @@ function upstreamRef(): string {
 }
 const ALLOWED = [
   '.agents/goals/',
+  '.github/workflows/dsh-tui-publish.yml',
   'apps/tui/',
   'apps/cli/src/bin.ts',
   'apps/cli/package.json',
@@ -42,5 +44,12 @@ describe('TUI fork boundary', () => {
     const files = [...new Set([...tracked.split('\n'), ...untracked.split('\n')].filter(Boolean))].sort()
     const outside = files.filter(file => !ALLOWED.some(prefix => file === prefix || file.startsWith(prefix)))
     expect(outside).toEqual([])
+  })
+
+  it('keeps the TUI package at the upstream release version', () => {
+    // Upstream bumps every workspace package at release time, but never this one: after a
+    // rebase onto a new tag, set apps/tui/package.json `version` to the root version.
+    const version = (path: string): string => (JSON.parse(readFileSync(resolve(ROOT, path), 'utf8')) as { version: string }).version
+    expect(version('apps/tui/package.json'), 'apps/tui/package.json version must follow the root package.json').toBe(version('package.json'))
   })
 })

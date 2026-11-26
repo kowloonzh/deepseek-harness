@@ -208,6 +208,8 @@ export class TuiApp {
   private historyIndex = 0
   /** A left press landed on the "back to bottom" control and has not been released yet. */
   private followPressed = false
+  /** The command that started this TUI: `dsh tui`, or `dsh-tui` from the standalone package. */
+  private command = 'dsh tui'
   private overlay: Overlay | undefined
   private readonly queuedInteractions: Array<ApprovalPrompt | QuestionPrompt> = []
   /** Where the transcript view sits; a reading position stays on its content as rows arrive. */
@@ -354,6 +356,8 @@ export class TuiApp {
     readonly stdout?: NodeJS.WriteStream
     readonly env?: NodeJS.ProcessEnv
     readonly onApp?: (app: TuiApp) => void
+    /** The command that started this TUI, quoted in the resume hint printed on exit. */
+    readonly command?: string
   }): Promise<number> {
     const app = new TuiApp(
       options.hostClose,
@@ -363,6 +367,7 @@ export class TuiApp {
       options.prompt === undefined ? undefined : { prompt: options.prompt, thenExit: true },
       options.reconnect,
     )
+    if (options.command !== undefined) app.command = options.command
     options.onApp?.(app)
     const restoreConsole = app.captureConsole()
     try {
@@ -2445,7 +2450,7 @@ export class TuiApp {
   private async dispose(): Promise<void> {
     const sessionId = this.state.sessionId
     this.terminalCleanup()
-    if (sessionId !== undefined) this.stdout.write(localized.resumeSession(String(sessionId)))
+    if (sessionId !== undefined) this.stdout.write(localized.resumeSession(String(sessionId), this.command))
     // A fresh install does not have to wait for a child process to go away.
     if (this.exitTimer !== undefined) clearTimeout(this.exitTimer)
     this.followAbort?.abort()

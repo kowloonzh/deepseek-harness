@@ -138,7 +138,7 @@ export const localized = {
   selectionCopied: (characters: number): string => `Copied ${String(characters)} characters`,
   exported: (path: string, format: 'markdown' | 'zip'): string =>
     `Exported the session ${format === 'zip' ? 'log (ZIP)' : 'as Markdown'} to:\n${path}`,
-  resumeSession: (sessionId: string): string => `\nResume this session with:\ndsh tui --resume ${sessionId}\n`,
+  resumeSession: (sessionId: string, command = 'dsh tui'): string => `\nResume this session with:\n${command} --resume ${sessionId}\n`,
   shellRunning: (command: string): string => `running !${command}`,
   steersSent: (count: number): string => count === 1
     ? 'Turn interrupted · sent the steer message as a new turn'

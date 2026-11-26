@@ -20,9 +20,11 @@ export interface RunTuiOptions {
   readonly stdin?: NodeJS.ReadStream
   readonly stdout?: NodeJS.WriteStream
   readonly stderr?: NodeJS.WriteStream
+  /** How the user invoked the TUI, for help and messages: `dsh tui` (default) or `dsh-tui`. */
+  readonly command?: string
 }
 
-const HELP = `Usage: dsh tui [--resume [session-id]] [--prompt <text>]
+const help = (command: string): string => `Usage: ${command} [--resume [session-id]] [--prompt <text>]
 
 Run the terminal frontend against the normal web profile.
 
@@ -48,13 +50,14 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
   const parsed = parseTuiArguments(options.args)
   const stdout = options.stdout ?? process.stdout
   const stderr = options.stderr ?? process.stderr
+  const command = options.command ?? 'dsh tui'
   if (parsed.help) {
-    stdout.write(HELP)
+    stdout.write(help(command))
     return 0
   }
   const stdin = options.stdin ?? process.stdin
   if (!stdin.isTTY || !stdout.isTTY) {
-    throw new TuiError('TUI_NOT_TTY', 'dsh tui requires an interactive terminal on stdin and stdout')
+    throw new TuiError('TUI_NOT_TTY', `${command} requires an interactive terminal on stdin and stdout`)
   }
 
   let host: WebHost | undefined
@@ -124,12 +127,13 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       stdout,
       env: options.env ?? process.env,
       onApp: (created) => { app = created },
+      command,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    stderr.write(`dsh tui: ${message}\n`)
+    stderr.write(`${command}: ${message}\n`)
     if (error instanceof TuiError && error.code === 'CONNECT_FAILED' && host !== undefined) {
-      stderr.write(`dsh tui: host ${safeUrl(host.origin)}\n`)
+      stderr.write(`${command}: host ${safeUrl(host.origin)}\n`)
     }
     return 1
   } finally {
@@ -172,3 +176,4 @@ function isLoopback(url: string): boolean {
     return false
   }
 }
+export { DSH_PACKAGE, resolveDshEntrypoint, runStandalone } from './standalone.ts'

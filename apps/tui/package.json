@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-tui-app",
   "description": "Minimal terminal frontend for a running DeepSeek Harness web profile",
-  "version": "0.2.2-rc.3",
+  "version": "0.2.3-alpha.2",
   "publishConfig": {
     "access": "public"
   },
@@ -31,7 +31,9 @@
     "src"
   ],
   "scripts": {
-    "bundle": "tsdown"
+    "bundle": "tsdown",
+    "pack:standalone": "tsx scripts/pack-standalone.ts",
+    "verify:standalone": "tsx scripts/verify-standalone.ts"
   },
   "license": "MIT",
   "dependencies": {

@@ -114,6 +114,9 @@ pnpm run build:artifacts    # the integration tests run against built lib/ and d
 # 2. Rebase the TUI branch onto it.
 git checkout feat/dsh-tui-profile
 git rebase master
+# Keep the TUI package at the release version; a test fails until it matches.
+(cd apps/tui && npm pkg set version="$(jq -r .version ../../package.json)")
+git commit -m "chore(tui): follow the upstream release version" apps/tui/package.json   # only when it changed
 
 # 3. Publish the rebased branch and move the baseline tag.
 git push --force-with-lease origin feat/dsh-tui-profile
@@ -138,6 +141,57 @@ pnpm --filter @deepseek-ai/dsh-tui-app run bundle
 
 The tests read `src/` through tsconfig paths and pass without this step, so a
 green suite does not mean a running terminal picked the change up.
+
+### Standalone npm package
+
+The same build also ships as `@kowloonzh/dsh-tui` on the public npm registry, for people
+who only want to run the TUI. It installs a `dsh-tui` command and depends on an exact
+release of `@deepseek-ai/dsh`, whose Host it starts:
+
+```sh
+npm install -g @kowloonzh/dsh-tui
+dsh-tui
+```
+
+The workspace package stays `@deepseek-ai/dsh-tui-app` behind `dsh tui`, so this branch
+still rebases onto upstream. `apps/tui/standalone/` holds the published package's own
+`package.json` and `README.md`; `scripts/pack-standalone.ts` stages it from the build:
+
+```sh
+pnpm --filter @deepseek-ai/dsh-tui-app run pack:standalone   # dist/standalone/kowloonzh-dsh-tui-<version>.tgz
+```
+
+The script derives the dependencies instead of copying them: each bare import left in the
+bundle becomes one, a workspace package pinned to its exact checked-out version, and
+`@deepseek-ai/dsh` is pinned to the version of `apps/cli`. A package bundled through
+`alwaysBundle` is not a dependency, so an upstream package that npm does not carry yet
+(such as `@deepseek-ai/dsh-typert-registry`) is safe to use that way. The packing fails
+on an import `apps/tui/package.json` does not declare, or on a private workspace package.
+
+Release only from a commit whose upstream base is a published `@deepseek-ai/dsh` version.
+`.github/workflows/dsh-tui-publish.yml` publishes from GitHub Actions through npm Trusted
+Publishing, so no npm login, 2FA prompt, or token is involved:
+
+```sh
+# after the suite passes: bump `release` in apps/tui/standalone/package.json, commit, push
+pnpm --filter @deepseek-ai/dsh-tui-app run pack:standalone
+v=$(jq -r .version dist/standalone/package/package.json)
+git tag "dsh-tui-v$v" && git push origin "dsh-tui-v$v"
+```
+
+The job compiles the workspace (`pnpm run typecheck`), packs, refuses a tag that does not name
+the packed version, installs the tarball into an empty directory and starts `dsh-tui` there
+(`verify:standalone`), and only then publishes with a provenance attestation. Running the
+workflow by hand packs and verifies without publishing.
+
+The version is the pinned Host version followed by `tui.<release>`: a stable `0.2.3` gives
+`0.2.3-tui.<release>`, and a prerelease `0.2.3-alpha.2`, which already has its `-`, gives
+`0.2.3-alpha.2.tui.<release>`. Both sort right after their Host version and before the next
+one; `0.2.3-alpha.2-tui.1` would not, because semver reads `2-tui` as one identifier that
+sorts after `alpha.3`. `release` in `standalone/package.json` is the only part
+kept by hand: bump it for a TUI-only release on the same Host, reset it to 1 when the Host
+version changes. Every such version is a semver prerelease, so publish with `--tag latest`
+explicitly, and a range like `^0.2.3` never selects one.
 
 ### Registering `dsh` for a Node version
 
