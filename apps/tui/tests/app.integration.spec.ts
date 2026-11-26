@@ -1,6 +1,8 @@
 /** Full terminal send/reply lifecycle through the keyless Web replay host. */
 
-import { resolve } from 'node:path'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { launchWebScaffold } from '../../web/tests/scaffold.ts'
@@ -208,6 +210,71 @@ describe('terminal prompt lifecycle', () => {
       await host.close()
     }
   }, 60_000)
+
+  it('exports the Session through the Host routes as Markdown and as the log ZIP', async () => {
+    // No model calls: the Session is only created and exported.
+    const host = await launchWebScaffold({})
+    const remote = await TuiRemoteClient.connect({
+      ...normalizeEntryUrl(host.authenticatedUrl), close: async () => {},
+    }, {
+      approval: () => Promise.resolve('rejected'),
+      question: () => Promise.resolve({ answers: [] }),
+      sessionStatus: () => {},
+      sessionError: () => {},
+    })
+    try {
+      const sessionId = await remote.createSession(host.workspaceCwd)
+      const markdown = new TextDecoder().decode(await remote.exportSession(sessionId, 'markdown'))
+      expect(markdown.length).toBeGreaterThan(0)
+      const zip = await remote.exportSession(sessionId, 'zip')
+      // A ZIP starts with the local file header signature `PK\x03\x04`.
+      expect([...zip.slice(0, 4)]).toEqual([0x50, 0x4B, 0x03, 0x04])
+
+      // `/export` in the terminal writes the file and prints where it went.
+      const dshHome = await mkdtemp(join(tmpdir(), 'dsh-tui-export-'))
+      const input = new PassThrough()
+      const output = new PassThrough()
+      const stdin = input as NodeJS.ReadStream
+      const stdout = output as NodeJS.WriteStream
+      stdin.setRawMode = () => stdin
+      stdout.rows = 24
+      stdout.columns = 160
+      let app: TuiApp | undefined
+      const running = TuiApp.run({
+        remote, hostClose: async () => {}, resume: sessionId, stdin, stdout, env: { DSH_HOME: dshHome },
+        onApp: (value) => { app = value },
+      })
+      const file = join(dshHome, 'exports', `dsh-${String(sessionId)}.md`)
+      try {
+        await expect.poll(() => app?.screenLines().length ?? 0).toBeGreaterThan(0)
+        input.write('/export\r')
+        await expect.poll(() => (app?.screenLines() ?? []).some(line => line.includes(file)), { timeout: 10_000 }).toBe(true)
+        // By now the Session is stored, so the transcript also names its log file.
+        expect(await readFile(file, 'utf8')).toMatch(/^# Untitled Session\n/u)
+        // Up steps back through what was sent, newest first; Down returns to the empty draft.
+        input.write('/help\r')
+        await expect.poll(() => draftText(app)).toBe('')
+        input.write('\u001b[A')
+        await expect.poll(() => draftText(app)).toBe('/help')
+        input.write('\u001b[A')
+        await expect.poll(() => draftText(app)).toBe('/export')
+        input.write('\u001b[B')
+        await expect.poll(() => draftText(app)).toBe('/help')
+        input.write('\u001b[B')
+        await expect.poll(() => draftText(app)).toBe('')
+      } finally {
+        // Ctrl+U first, so a draft a failed step left behind cannot swallow `/quit`.
+        input.write('\u0015/quit\r')
+        await running
+        input.destroy()
+        output.destroy()
+        await rm(dshHome, { recursive: true, force: true })
+      }
+    } finally {
+      await remote.close()
+      await host.close()
+    }
+  }, 30_000)
 
   it('completes Host commands and user-invocable skills after slash', async () => {
     const host = await launchWebScaffold({ compareReplaySession: false })

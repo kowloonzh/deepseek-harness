@@ -77,6 +77,9 @@ export class TuiRemoteClient {
   private constructor(
     private readonly context: Context,
     readonly hostHome: () => string | undefined,
+    /** Authenticated HTTP to the Host, for its plain routes such as the Session exports. */
+    private readonly hostFetch: typeof fetch,
+    private readonly origin: URL,
   ) {}
 
   /**
@@ -89,10 +92,11 @@ export class TuiRemoteClient {
   static async connect(host: WebHost, handlers: RemoteInteractionHandlers): Promise<TuiRemoteClient> {
     const cookie = await connectCookie(host.entryUrl)
     const context = new Context()
+    const hostFetch = authenticatedFetch(host.origin, cookie)
     installConnection(context, {
       interactions: 'answer',
       transport: {
-        fetch: authenticatedFetch(host.origin, cookie),
+        fetch: hostFetch,
         createWebSocket: authenticatedWebSocket(cookie),
         streamBaseUrl: host.origin.href,
       },
@@ -102,7 +106,7 @@ export class TuiRemoteClient {
       await context.plugin(Registry).await()
       await context.plugin(Gateway).await()
       await context.plugin(Remotes).await()
-      const client = new TuiRemoteClient(context, () => context.remote.$host.home)
+      const client = new TuiRemoteClient(context, () => context.remote.$host.home, hostFetch, host.origin)
       client.registerInteractions(handlers)
       await client.waitConnected()
       return client
@@ -161,6 +165,27 @@ export class TuiRemoteClient {
    */
   onConnectionState(listener: () => void): () => void {
     return this.context.connection.state.subscribe(listener)
+  }
+
+  /**
+   * Download one Session through the Host's export routes, the ones the Web `/export` and
+   * "copy as Markdown" use.
+   * @param sessionId - the Session to export.
+   * @param format - `markdown` for the readable transcript, `zip` for the raw log with its
+   * subagents and attachments.
+   * @param signal - cancels the download.
+   * @returns the exported bytes.
+   */
+  async exportSession(sessionId: SessionId, format: 'markdown' | 'zip', signal?: AbortSignal): Promise<Uint8Array> {
+    const query = new URLSearchParams({ sessionId, ...(format === 'zip' ? { includeDescendants: 'true' } : {}) })
+    const route = format === 'zip' ? 'api/session.export' : 'api/session.markdown'
+    const response = await this.hostFetch(new URL(`${route}?${query.toString()}`, new URL('/', this.origin)), signal === undefined ? {} : { signal })
+    if (!response.ok) {
+      // The Host keeps these bodies short and free of paths.
+      const reason = (await response.text().catch(() => '')).trim().slice(0, 200)
+      throw new TuiError('EXPORT_FAILED', `session export failed (HTTP ${String(response.status)})${reason === '' ? '' : `: ${reason}`}`)
+    }
+    return new Uint8Array(await response.arrayBuffer())
   }
 
   /** List durable Sessions without resuming an Agent. */

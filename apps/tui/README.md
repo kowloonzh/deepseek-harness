@@ -172,6 +172,7 @@ The first version implements:
 - queue/steer delivery, pending-message management, and Alt+Up recall;
 - `/queue`, `/retry`, and `/context` for pending input, failed-turn continuation, and context details;
 - `/status` as a tabbed panel (←/→ or Tab switch, Esc closes): Status for the Session's identity and settings, Stats for whole-Session conversation figures, and Context for the context-window breakdown, which `/context` opens directly;
+- `/export` to save the Session as Markdown under `$DSH_HOME/exports/` and print the file path (`/export zip` for the raw log ZIP with subagents and attachments, `/export <path>` to choose the file);
 - command and `@path` completion;
 - tool approvals and `ask_user_question`;
 - grouped tool runs showing counts, names, and running/failed status, with each tool's arguments and output under Ctrl+O;

@@ -153,6 +153,7 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 - queue/steer 投递、待处理消息管理和 Alt+Up 召回；
 - `/queue`、`/retry` 和 `/context`，分别管理待处理输入、继续失败轮次和查看上下文明细；
 - `/status` 是分页签面板（←/→ 或 Tab 切换，Esc 关闭）：Status 页显示会话标识和设置，Stats 页显示整个会话的对话统计，Context 页显示上下文窗口明细，`/context` 直接打开该页；
+- `/export` 把会话保存为 Markdown，放在 `$DSH_HOME/exports/` 下并打印文件路径（`/export zip` 导出包含子代理和附件的原始日志 ZIP，`/export <path>` 指定文件）；
 - 命令和 `@path` 补全；
 - 工具审批和 `ask_user_question`；
 - 连续工具调用分组显示数量、名称和 running/failed 状态，Ctrl+O 展开每个工具的完整参数与输出；

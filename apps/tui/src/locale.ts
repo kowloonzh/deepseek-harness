@@ -17,6 +17,7 @@ export const messages = {
     '/context          show context usage (the Context tab of /status)',
     '/queue            manage pending messages',
     '/retry            continue the latest failed turn',
+    '/export [zip|path] save this session as Markdown (zip: raw log) and print the file',
     '/status           show session status, conversation stats, and context in tabs',
     '/<skill-name>     invoke a user-invocable skill',
     '/exit             interrupt a running turn and exit (also /quit)',
@@ -88,6 +89,8 @@ export const messages = {
   contextUnavailable: 'Context usage is not available yet',
   statsUnavailable: 'This Host serves no session stats',
   statsEmpty: 'No steps yet',
+  exporting: 'Exporting the session...',
+  exportNoSession: 'No session is open to export',
   reconnecting: 'Host connection lost; reconnecting (a restarted host is picked up from its new URL)...',
   reconnectingSameUrl: 'Host connection lost; reconnecting...',
   reconnected: 'Reconnected to the host',
@@ -134,6 +137,8 @@ export const localized = {
   imageCountLimit: (count: number): string => `A prompt can contain at most ${String(count)} images`,
   imageMessageLimit: (mebibytes: number): string => `Image attachments exceed the ${String(mebibytes)} MiB prompt limit`,
   selectionCopied: (characters: number): string => `Copied ${String(characters)} characters`,
+  exported: (path: string, format: 'markdown' | 'zip'): string =>
+    `Exported the session ${format === 'zip' ? 'log (ZIP)' : 'as Markdown'} to:\n${path}`,
   resumeSession: (sessionId: string): string => `\nResume this session with:\ndsh tui --resume ${sessionId}\n`,
   shellRunning: (command: string): string => `running !${command}`,
   steersSent: (count: number): string => count === 1

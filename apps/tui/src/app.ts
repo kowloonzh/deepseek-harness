@@ -2,7 +2,8 @@
 
 import { format } from 'node:util'
 import { appendFileSync, readdirSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 import type {
   ModelCatalog,
   SessionId,
@@ -32,6 +33,7 @@ import {
 } from './terminal-signals.ts'
 import { magpieProvider, readMagpieQuota, type QuotaWindow } from './quota.ts'
 import { NEXT_PROMPT_COMMAND, SUGGEST_ENV } from './suggest.ts'
+import { exportTarget } from './export.ts'
 import { TuiError } from './error.ts'
 import {
   selectedText,
@@ -74,7 +76,7 @@ import {
 const LARGE_PASTE_CHARS = 1000
 /** How long `/exit` waits for the host to confirm it cancelled the running turn. */
 const EXIT_CANCEL_WAIT_MS = 3000
-const LOCAL_COMMANDS = ['help', 'new', 'resume', 'model', 'compact', 'status', 'context', 'queue', 'retry', 'exit'] as const
+const LOCAL_COMMANDS = ['help', 'new', 'resume', 'model', 'compact', 'status', 'context', 'queue', 'retry', 'export', 'exit'] as const
 /**
  * Aliases the terminal accepts without listing them in the slash menu.
  * `/quit` and `/q` are kept so existing habits, launcher scripts, and panes keep working.
@@ -93,6 +95,7 @@ const LOCAL_COMMAND_DESCRIPTIONS: Readonly<Record<(typeof LOCAL_COMMANDS)[number
   context: 'Show context and token usage',
   queue: 'Manage pending messages',
   retry: 'Continue the latest failed turn',
+  export: 'Save this session as Markdown (or `zip` for the raw log) and show where',
   exit: 'Interrupt the running turn and exit the TUI',
 }
 const MOUSE_TRACKING_ON = '\u001b[?1000h\u001b[?1002h\u001b[?1006h'
@@ -654,6 +657,12 @@ export class TuiApp {
     }
     if (this.slashMenuOpen()) {
       const suggestions = this.visibleSlashSuggestions()
+      // A recalled `/command` opens the menu too; until it is edited, Up/Down keep walking
+      // history rather than the menu, as codex does.
+      if ((key.name === 'up' || key.name === 'down') && this.browsingHistory()) {
+        this.moveHistory(key.name === 'up' ? -1 : 1)
+        return
+      }
       if (key.name === 'up') {
         this.slashIndex = Math.max(0, this.slashIndex - 1)
         this.requestRender()
@@ -721,20 +730,14 @@ export class TuiApp {
       return
     }
     if (key.name === 'mouse-other') return
-    if (key.name === 'up') {
-      this.moveHistory(1)
-      return
-    }
-    if (key.name === 'down') {
+    // History is oldest-first with the index one past the newest entry, so Up (and Ctrl+P)
+    // steps back to older messages and Down (Ctrl+N) forward to the empty draft.
+    if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
       this.moveHistory(-1)
       return
     }
-    if (key.ctrl && key.name === 'p') {
+    if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
       this.moveHistory(1)
-      return
-    }
-    if (key.ctrl && key.name === 'n') {
-      this.moveHistory(-1)
       return
     }
     if (key.name === 'left') {
@@ -1468,6 +1471,31 @@ export class TuiApp {
     }
     if (name === 'retry') {
       await this.retryTurn()
+      return
+    }
+    if (name === 'export') await this.exportSession(line.slice(1 + 'export'.length).trim())
+  }
+
+  /**
+   * Save the Session to a file through the Host's export routes and name the file.
+   * @param args - text after `/export`: empty, `zip`, or a path.
+   */
+  private async exportSession(args: string): Promise<void> {
+    const sessionId = this.state.sessionId
+    if (sessionId === undefined) {
+      this.setNotice(messages.exportNoSession)
+      return
+    }
+    const target = exportTarget(args, String(sessionId), this.state.cwd, this.env)
+    this.setNotice(messages.exporting)
+    try {
+      const bytes = await this.remote.exportSession(sessionId, target.format)
+      await mkdir(dirname(target.path), { recursive: true })
+      await writeFile(target.path, bytes)
+      this.addSystem(localized.exported(target.path, target.format))
+      this.setNotice(undefined)
+    } catch (error) {
+      this.addError(error)
     }
   }
 
@@ -1821,6 +1849,11 @@ export class TuiApp {
     } catch (error) {
       if (!(error instanceof Error)) throw error
     }
+  }
+
+  /** Whether the draft is a history entry recalled unchanged. */
+  private browsingHistory(): boolean {
+    return this.historyIndex < this.history.length && this.editor.text === this.history[this.historyIndex]
   }
 
   private moveHistory(direction: number): void {
