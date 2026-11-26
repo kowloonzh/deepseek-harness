@@ -1543,6 +1543,9 @@ export function latestReasoningLine(items: readonly TranscriptItem[]): string | 
   return undefined
 }
 
+const DOCK_ITEM = '  ↳ '
+const DOCK_HINT = '    '
+
 function queueDockLines(
   queue: TranscriptState['queue'],
   submission: PendingSubmission | undefined,
@@ -1551,26 +1554,30 @@ function queueDockLines(
 ): string[] {
   if (limit <= 0) return []
   const lines: string[] = []
+  // Inset like codex's pending-message rows: each message under a `↳`, its hint under the
+  // message text, so the dock lines up with the status indicator above it instead of the edge.
+  const row = (text: string): string => `${DOCK_ITEM}${fit(text, Math.max(1, width - displayWidth(DOCK_ITEM)))}`
+  const hint = (text: string): string => `${DOCK_HINT}${fit(text, Math.max(1, width - DOCK_HINT.length))}`
   if (submission !== undefined) {
     const images = submission.imageCount === 0 ? '' : ` [${String(submission.imageCount)} image]`
-    lines.push(`${YELLOW}${fit(`sending ${submission.mode}: ${submission.text}${images}`, width)}${RESET}`)
+    lines.push(`${YELLOW}${row(`sending ${submission.mode}: ${submission.text}${images}`)}${RESET}`)
   }
   const budget = Math.max(0, 3 - lines.length)
   for (const item of queue.slice(0, budget)) {
     if (item.placement === 'context') {
       // Host-queued context, such as a finished background job: nothing to recall or manage.
-      lines.push(`${DIM}${fit(`${messages.queueContext}: ${item.summary ?? item.text}`, width)}${RESET}`)
+      lines.push(`${DIM}${row(`${messages.queueContext}: ${item.summary ?? item.text}`)}${RESET}`)
       continue
     }
     const kind = item.placement === 'steering' ? 'steer' : 'queued'
     // The hint rides on the message itself so it stays visible however many are pending.
-    lines.push(`${DIM}${fit(`${kind}: ${item.text || '[attachment]'}`, width)}${RESET}`)
+    lines.push(`${DIM}${row(`${kind}: ${item.text || '[attachment]'}`)}${RESET}`)
     // Only actions that apply to a queued row: a draft-level shortcut (Alt+Enter) belongs in
     // `/help`, where its condition is stated, not beside rows it cannot touch.
-    lines.push(`${DIM}${fit('   Alt+Up recall · /queue manage', width)}${RESET}`)
+    lines.push(`${DIM}${hint('Alt+Up recall · /queue manage')}${RESET}`)
   }
   if (queue.length > budget) {
-    lines.push(`${DIM}${fit(`${String(queue.length - budget)} more pending · /queue manage`, width)}${RESET}`)
+    lines.push(`${DIM}${hint(`${String(queue.length - budget)} more pending · /queue manage`)}${RESET}`)
   }
   return lines.slice(0, limit)
 }

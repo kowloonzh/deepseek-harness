@@ -217,6 +217,9 @@ describe('terminal rendering', () => {
     expect(frame.text).toContain('sending steer: current [1 image]')
     expect(frame.text).toContain('queued: later')
     expect(frame.text).toContain('steer: adjust course')
+    // The dock is inset under the indicator: each message behind `↳`, its hint under the text.
+    expect(stripAnsi(frame.text).split('\n')).toContain('  ↳ queued: later')
+    expect(stripAnsi(frame.text).split('\n')).toContain('    Alt+Up recall · /queue manage')
     const status = stripAnsi(frame.text).split('\n').at(-1) ?? ''
     expect(status).toContain('model-x high · ')
     expect(status).toContain('ctx 50%')
@@ -804,7 +807,7 @@ describe('terminal rendering', () => {
           const area = rows - headerRows(rows)
           const top = lines.findIndex(line => line.startsWith('╭'))
           // Everything from the first dock row (or the composer) to the status row.
-          const paneTop = lines.findIndex(line => /^(?:queued|   Alt\+Up|\d+ more pending|╭)/u.test(line))
+          const paneTop = lines.findIndex(line => /^(?: {2}↳ queued| {4}Alt\+Up| {4}\d+ more pending|╭)/u.test(line))
           const bottomRows = rows - paneTop
           if (bottomRows > bottomPaneLimit(area)) offenders.push(`rows=${String(rows)} input=${String(inputRows)} dock=${String(dock)} bottom=${String(bottomRows)}`)
           // One gap row separates the two unless the screen is too short to spare it.
