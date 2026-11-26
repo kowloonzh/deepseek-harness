@@ -265,7 +265,7 @@ describe('terminal prompt lifecycle', () => {
     }
   }, 30_000)
 
-  it('offers the Host\'s guess at the next message after a turn, and Tab takes it', async () => {
+  it('offers the Host\'s guess at the next message after a turn, and Right takes it', async () => {
     const host = await launchWebScaffold({ compareReplaySession: false })
     const input = new PassThrough()
     const output = new PassThrough()
@@ -318,7 +318,7 @@ describe('terminal prompt lifecycle', () => {
       app?.setRunning(sessionId, false)
       await expect.poll(frame).toContain('❯ sort them by count')
       expect(lines).toEqual(['/tui-next-prompt'])
-      input.write('\t')
+      input.write('\u001b[C')
       await expect.poll(() => draftText(app)).toBe('sort them by count')
       input.write('\u0015')
       await expect.poll(() => draftText(app)).toBe('')

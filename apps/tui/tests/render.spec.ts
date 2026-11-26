@@ -1,6 +1,8 @@
 /** Width-aware deterministic terminal rendering. */
 
 import { describe, expect, it } from 'vitest'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import {
   bottomPaneLimit,
   headerRows,
@@ -163,9 +165,10 @@ describe('terminal rendering', () => {
     const bottom = lines.findIndex(line => line.startsWith('╰─'))
     expect(top).toBeGreaterThan(0)
     expect(bottom - top).toBeGreaterThanOrEqual(4)
-    // Idle is no longer a permanent marker; the status row still owns the last line.
+    // The run state is on the title row only; the status row still owns the last line.
+    expect(lines[0]).toContain('idle')
     expect(lines.at(-1)).toContain('~')
-    expect(lines.at(-1)).toContain(' · ')
+    expect(lines.at(-1)).not.toContain('idle')
     expect(lines[top + 1]).toContain('[Image #1] shot.png')
     expect(lines[top + 2]).toContain('next line')
     expect(frame.cursorRow).toBe(top + 4)
@@ -224,6 +227,50 @@ describe('terminal rendering', () => {
     // as an action on a queued row, which Alt+Enter cannot perform.
     expect(frame.text).toContain('Alt+Up recall')
     expect(frame.text).not.toContain('Alt+Enter')
+  })
+
+  it('shows whole-Session turns and steps on the status row, and drops them first when narrow', () => {
+    const state = { ...initialTranscript(), cwd: '/work/project' }
+    state.stats = { turns: 1, steps: 4, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0 }
+    const view = {
+      rows: 24, columns: 120, state, input: '', cursor: 0,
+      overlay: undefined, expandedTools: false, scroll: LATEST, notice: undefined,
+    }
+    const status = (columns: number): string => stripAnsi(renderView({ ...view, columns }).text).split('\n').at(-1) ?? ''
+    expect(status(120)).toBe('  /work/project · 1 turn/4 steps')
+    // The working directory gives way first, then the counts.
+    expect(status(22)).toBe('  1 turn/4 steps')
+    state.stats = { ...state.stats, turns: 120, steps: 4800 }
+    expect(status(20)).toBe('  ')
+  })
+
+  it('draws /status as tabs over live readings', () => {
+    const state = { ...initialTranscript(), sessionId: brandString<SessionId>('session-1'), cwd: '/work/project' }
+    state.stats = { turns: 2, steps: 8, llmMs: 162_000, toolMs: 45_200, ttftMs: 7_200, ttftSteps: 4, decodeMs: 20_000, decodeTokens: 1_240 }
+    state.tokens = { input: 1200, output: 900, cacheRead: 4800, cacheWrite: 0 }
+    state.context = { pressureTokens: 14_200, contextWindow: 200_000 }
+    const panel = (tab: 'status' | 'stats' | 'context'): string => stripAnsi(renderView({
+      rows: 30, columns: 100, state, input: '', cursor: 0,
+      overlay: { kind: 'status', tab }, expandedTools: false, scroll: LATEST, notice: undefined,
+    }).text)
+    expect(panel('status')).toContain(' Status   Stats   Context ')
+    expect(panel('status')).toMatch(/Session +session-1/u)
+    expect(panel('status')).toContain('Esc close')
+    const stats = panel('stats')
+    expect(stats).toMatch(/Turns \/ steps +2 turns · 8 steps/u)
+    expect(stats).toMatch(/Steps per turn +4\.0/u)
+    expect(stats).toMatch(/Model time +2m42s/u)
+    expect(stats).toMatch(/Tool time +45\.2s/u)
+    expect(stats).toMatch(/First token avg +1\.8s/u)
+    expect(stats).toMatch(/Output speed +62 tok\/s/u)
+    expect(stats).toMatch(/Cache hit +80%/u)
+    expect(stats).toMatch(/Cache read +4,800/u)
+    expect(stats).not.toContain('Cache write')
+    expect(panel('context')).toMatch(/Context +7% \(14k\/200k\)/u)
+    expect(stripAnsi(renderView({
+      rows: 30, columns: 100, state: initialTranscript(), input: '', cursor: 0,
+      overlay: { kind: 'status', tab: 'stats' }, expandedTools: false, scroll: LATEST, notice: undefined,
+    }).text)).toContain('This Host serves no session stats')
   })
 
   it('groups consecutive tool calls and expands individual details with Ctrl+O', () => {

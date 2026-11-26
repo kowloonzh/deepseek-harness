@@ -1,5 +1,6 @@
 /** `dsh tui` entrypoint: connect to the web profile or start its host. */
 
+import { readFileSync } from 'node:fs'
 import { TuiApp, interactionHandlers, parseTuiArguments } from './app.ts'
 import { safeUrl, TuiError } from './error.ts'
 import {
@@ -7,7 +8,7 @@ import {
   spawnWebHost,
   type WebHost,
 } from './host.ts'
-import { TuiRemoteClient } from './remote.ts'
+import { TuiRemoteClient, type RemoteInteractionHandlers } from './remote.ts'
 import { bundledPluginPath, ensureNextPromptEntry, SUGGEST_ENV } from './suggest.ts'
 
 /** Inputs supplied by the CLI launcher and overridable by tests. */
@@ -60,7 +61,18 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
   let remote: TuiRemoteClient | undefined
   let app: TuiApp | undefined
   try {
-    const configured = (options.env ?? process.env).DSH_URL
+    const env = options.env ?? process.env
+    const configured = env.DSH_URL
+    const handlers: RemoteInteractionHandlers = {
+      approval: request => app === undefined
+        ? Promise.reject(new Error('TUI is still starting'))
+        : interactionHandlers(app).approval(request),
+      question: request => app === undefined
+        ? Promise.reject(new Error('TUI is still starting'))
+        : interactionHandlers(app).question(request),
+      sessionStatus: (sessionId, running) => { app?.setRunning(sessionId, running) },
+      sessionError: (sessionId, message) => { app?.remoteError(sessionId, message) },
+    }
     ensureSuggestions(options.env ?? process.env, configured)
     // The host starts and connects behind the first frame instead of in front of it.
     const connecting = (async () => {
@@ -74,18 +86,28 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           ...normalizeEntryUrl(configured),
           close: async () => {},
         }
-      remote = await TuiRemoteClient.connect(host, {
-        approval: request => app === undefined
-          ? Promise.reject(new Error('TUI is still starting'))
-          : interactionHandlers(app).approval(request),
-        question: request => app === undefined
-          ? Promise.reject(new Error('TUI is still starting'))
-          : interactionHandlers(app).question(request),
-        sessionStatus: (sessionId, running) => { app?.setRunning(sessionId, running) },
-        sessionError: (sessionId, message) => { app?.remoteError(sessionId, message) },
-      })
+      remote = await TuiRemoteClient.connect(host, handlers)
       return remote
     })()
+    // A Host that restarts writes its new tokenized URL here (`dsh-host` does); a dropped
+    // connection reads it to log in to the new Host, since the old login is no good there.
+    const urlFile = env.DSH_URL_FILE
+    let currentUrl = configured?.trim()
+    const reconnect = configured === undefined || configured.trim() === '' || urlFile === undefined || urlFile === ''
+      ? undefined
+      : async (): Promise<TuiRemoteClient | undefined> => {
+        let url: string
+        try {
+          url = readFileSync(urlFile, 'utf8').trim()
+        } catch {
+          return undefined
+        }
+        if (url === '' || url === currentUrl) return undefined
+        const next = await TuiRemoteClient.connect({ ...normalizeEntryUrl(url), close: async () => {} }, handlers)
+        currentUrl = url
+        remote = next
+        return next
+      }
     // Quitting during startup leaves this unawaited; its failure is reported through `run`.
     connecting.catch(() => {})
     return await TuiApp.run({
@@ -97,6 +119,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       },
       resume: parsed.resume,
       prompt: parsed.prompt,
+      reconnect,
       stdin,
       stdout,
       env: options.env ?? process.env,

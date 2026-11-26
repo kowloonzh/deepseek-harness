@@ -130,8 +130,6 @@
   disabled: true
 
 # Batch 2: browser-only projections and Remote controllers not called by the TUI.
-- id: session-stats
-  disabled: true
 - id: session-turn-outline
   disabled: true
 - id: workspace-changes

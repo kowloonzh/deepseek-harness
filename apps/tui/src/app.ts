@@ -1,5 +1,6 @@
 /** Minimal alternate-screen terminal application over the public DSH Client Remote API. */
 
+import { format } from 'node:util'
 import { appendFileSync, readdirSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type {
@@ -33,7 +34,6 @@ import { magpieProvider, readMagpieQuota, type QuotaWindow } from './quota.ts'
 import { NEXT_PROMPT_COMMAND, SUGGEST_ENV } from './suggest.ts'
 import { TuiError } from './error.ts'
 import {
-  cacheHitPercent,
   selectedText,
   LATEST,
   TerminalRenderer,
@@ -66,6 +66,8 @@ import {
   type QuestionUiRequest,
   type SlashSuggestion,
   type SessionPicker,
+  STATUS_TABS,
+  type StatusTab,
 } from './ui.ts'
 
 /** A paste longer than this many characters collapses to a placeholder, as codex's composer does. */
@@ -104,6 +106,11 @@ const DEFAULT_IMAGE_LIMITS = {
 const QUEUE_MODE = 'queue' as const
 /** Grace after `stop` for `dispose` to finish before the process exits anyway. */
 const FINAL_EXIT_GRACE_MS = 3_000
+/**
+ * How often a dropped connection looks for the Host's newest URL. A restarted Host mints a fresh
+ * launch token, so the old login never works again and only a new connection gets back in.
+ */
+const RECONNECT_POLL_MS = 1_000
 /** A lone Escape byte, which may be the first half of an Alt-modified key. */
 const ESCAPE_PREFIX = '\u001b'
 /**
@@ -239,6 +246,12 @@ export class TuiApp {
   private exitTimer: NodeJS.Timeout | undefined
   /** The Remote client once the host is up; the screen and input work before it. */
   private connection: TuiRemoteClient | undefined
+  /** Runs while the carrier is down, trying the Host's newest URL. */
+  private connectionTrouble: NodeJS.Timeout | undefined
+  private reconnecting = false
+  private unwatchConnection: (() => void) | undefined
+  /** Connects to the Host's current URL when it changed; undefined when there is no source of URLs. */
+  private readonly reconnect: (() => Promise<TuiRemoteClient | undefined>) | undefined
   /** Settles with the first Session once it opens. */
   private readonly sessionReady: Promise<SessionId>
   private resolveSessionReady: (sessionId: SessionId) => void = () => {}
@@ -281,7 +294,9 @@ export class TuiApp {
     private readonly stdout: NodeJS.WriteStream,
     env: NodeJS.ProcessEnv,
     bootstrap?: { readonly prompt: string; readonly thenExit: boolean },
+    reconnect?: () => Promise<TuiRemoteClient | undefined>,
   ) {
+    this.reconnect = reconnect
     this.env = env
     this.notifyMethod = notificationMethod(env)
     this.terminalCleanup = this.enterTerminal()
@@ -325,6 +340,11 @@ export class TuiApp {
     readonly hostClose: () => Promise<void>
     readonly resume: string | true | undefined
     readonly prompt?: string | undefined
+    /**
+     * Connect again after the Host restarted: resolves with a client on the Host's newest URL,
+     * or undefined while that URL is the one already in use or not there yet.
+     */
+    readonly reconnect?: (() => Promise<TuiRemoteClient | undefined>) | undefined
     readonly stdin?: NodeJS.ReadStream
     readonly stdout?: NodeJS.WriteStream
     readonly env?: NodeJS.ProcessEnv
@@ -336,8 +356,10 @@ export class TuiApp {
       options.stdout ?? process.stdout,
       options.env ?? process.env,
       options.prompt === undefined ? undefined : { prompt: options.prompt, thenExit: true },
+      options.reconnect,
     )
     options.onApp?.(app)
+    const restoreConsole = app.captureConsole()
     try {
       // Starting the host takes seconds; the composer is usable meanwhile.
       app.bindInput()
@@ -353,6 +375,7 @@ export class TuiApp {
         return connected.code
       }
       app.connection = connected.remote
+      app.watchConnection()
       await app.openInitialSession(options.resume)
       if (app.notice === messages.starting) app.setNotice(undefined)
       app.requestRender()
@@ -360,7 +383,101 @@ export class TuiApp {
       return await app.exited
     } finally {
       await app.dispose()
+      restoreConsole()
     }
+  }
+
+  /**
+   * Keep library console output off the frame, which it would tear: the carrier's retry log is
+   * dropped, since the status row reports the connection, and anything else becomes the notice.
+   * @returns a function that puts the console back.
+   */
+  private captureConsole(): () => void {
+    const methods = ['log', 'info', 'warn', 'error', 'debug'] as const
+    const saved = methods.map(name => console[name])
+    for (const name of methods) {
+      console[name] = (...args: unknown[]) => {
+        const text = format(...args)
+        if (text.startsWith('[connection]')) return
+        const line = text.split('\n', 1)[0]?.trim() ?? ''
+        if (line !== '' && !this.stopped) this.setNotice(line)
+      }
+    }
+    return () => {
+      methods.forEach((name, index) => { console[name] = saved[index] ?? console[name] })
+    }
+  }
+
+  /** Follow the Remote carrier, so a dropped Host connection is noticed even while idle. */
+  private watchConnection(): void {
+    this.unwatchConnection = this.remote.onConnectionState(() => {
+      if (this.remote.connectionState() === 'connected') {
+        if (this.connectionTrouble !== undefined) this.recoverConnection()
+      } else this.connectionLost()
+    })
+  }
+
+  /**
+   * The carrier dropped, or a stream failed with it. Until it is back, keep trying: the old
+   * carrier comes back by itself after a blip, and a restarted Host is reached on its new URL.
+   */
+  private connectionLost(): void {
+    if (this.stopped || this.connectionTrouble !== undefined) return
+    this.setNotice(this.reconnect === undefined ? messages.reconnectingSameUrl : messages.reconnecting)
+    this.connectionTrouble = setInterval(() => { void this.tryNewHost() }, RECONNECT_POLL_MS)
+    void this.tryNewHost()
+  }
+
+  private async tryNewHost(): Promise<void> {
+    if (this.reconnect === undefined || this.reconnecting || this.stopped) return
+    this.reconnecting = true
+    try {
+      const next = await this.reconnect()
+      if (next === undefined) return
+      if (!this.stillReconnecting()) {
+        void next.close().catch(() => {})
+        return
+      }
+      const previous = this.connection
+      this.unwatchConnection?.()
+      this.connection = next
+      this.watchConnection()
+      // The old client would retry its stale login forever; its streams are dead already.
+      void previous?.close().catch(() => {})
+      void this.loadDefaultModel()
+      this.recoverConnection()
+    } catch {
+      // The new Host may still be starting; the next tick tries again.
+    } finally {
+      this.reconnecting = false
+    }
+  }
+
+  /** Read through a method: the await before it may have stopped the app or the retrying. */
+  private stillReconnecting(): boolean {
+    return !this.stopped && this.connectionTrouble !== undefined
+  }
+
+  /** The connection is back: the streams ended with the old one, so open the Session again. */
+  private recoverConnection(): void {
+    if (this.connectionTrouble !== undefined) clearInterval(this.connectionTrouble)
+    this.connectionTrouble = undefined
+    const sessionId = this.state.sessionId
+    if (sessionId !== undefined) this.switchSession(sessionId, false)
+    this.setNotice(messages.reconnected)
+  }
+
+  /**
+   * A stream ended with an error. One that went down with the carrier is the connection's
+   * business, not a failure to show in the transcript.
+   */
+  private streamFailed(error: unknown): void {
+    const carrier = error instanceof Error && error.name === 'RemoteStreamCarrierError'
+    if (carrier || this.connectionTrouble !== undefined || this.remote.connectionState() !== 'connected') {
+      this.connectionLost()
+      return
+    }
+    this.addError(error)
   }
 
   private async openInitialSession(resume: string | true | undefined): Promise<void> {
@@ -627,6 +744,8 @@ export class TuiApp {
       return
     }
     if (key.name === 'right') {
+      // As in fish's autosuggestions, Right on an empty composer accepts the dim guess.
+      if (!key.meta && !key.ctrl && this.takeSuggestion()) return
       if (key.meta || key.ctrl) this.editor.moveWordRight()
       else this.editor.moveRight()
       this.requestRender()
@@ -851,6 +970,16 @@ export class TuiApp {
   private handleOverlayKey(sequence: string, key: Key): void {
     const overlay = this.overlay
     if (overlay === undefined) return
+    if (overlay.kind === 'status') {
+      const at = STATUS_TABS.indexOf(overlay.tab)
+      const step = key.name === 'right' || (key.name === 'tab' && key.shift !== true)
+        ? 1
+        : key.name === 'left' || (key.name === 'tab' && key.shift === true) ? -1 : 0
+      if (step !== 0) overlay.tab = STATUS_TABS[(at + step + STATUS_TABS.length) % STATUS_TABS.length] ?? overlay.tab
+      else if (key.name === 'escape' || key.name === 'return' || key.name === 'enter' || sequence === 'q'
+        || (key.ctrl && key.name === 'c')) this.closeOverlay()
+      return
+    }
     if (overlay.kind === 'sessions') {
       if (key.name === 'up') overlay.index = Math.max(0, overlay.index - 1)
       else if (key.name === 'down') overlay.index = Math.min(overlay.items.length - 1, overlay.index + 1)
@@ -1322,11 +1451,11 @@ export class TuiApp {
       return
     }
     if (name === 'status') {
-      this.showStatus()
+      this.showStatus('status')
       return
     }
     if (name === 'context') {
-      this.showContext()
+      this.showStatus('context')
       return
     }
     if (name === 'queue') {
@@ -1484,56 +1613,10 @@ export class TuiApp {
     }, 6 * 60 * 60 * 1000).unref()
   }
 
-  private showStatus(): void {
-    const session = this.state.sessionId ?? '(none)'
-    const model = this.state.model === undefined ? '(default)' : `${this.state.model.provider}/${this.state.model.model}`
-    const tokens = this.state.tokens === undefined
-      ? 'unavailable'
-      : `${String(this.state.tokens.input)} input, ${String(this.state.tokens.output)} output, `
-        + `${String(this.state.tokens.cacheRead)} cache read, ${String(this.state.tokens.cacheWrite)} cache write`
-    const cache = cacheHitPercent(this.state.tokens)
-    this.addSystem([
-      `${messages.statusLabels.session}: ${session}`,
-      `${messages.statusLabels.title}: ${this.state.title}`,
-      `${messages.statusLabels.directory}: ${this.state.cwd}`,
-      `${messages.statusLabels.model}: ${model}`,
-      `${messages.statusLabels.effort}: ${this.state.model?.reasoningEffort ?? '(default)'}`,
-      `${messages.statusLabels.tokens}: ${tokens}`,
-      `${messages.statusLabels.cacheHit}: ${cache === undefined ? '(no billed input yet)' : `${String(cache)}%`}`,
-      `${messages.statusLabels.context}: ${this.contextSummary()}`,
-      `${messages.statusLabels.permission}: ${this.state.permission ?? '(unknown)'}`,
-      `${messages.statusLabels.state}: ${this.state.running ? 'running' : 'idle'}`,
-      // The frame is laid out against these two numbers, so a layout report can quote them.
-      `${messages.statusLabels.terminal}: ${String(this.stdout.columns)}x${String(this.stdout.rows)}`,
-    ].join('\n'))
-  }
-
-  private showContext(): void {
-    const context = this.state.context
-    if (context === undefined) {
-      this.addSystem(messages.contextUnavailable)
-      return
-    }
-    this.addSystem([
-      `${messages.statusLabels.context}: ${this.contextSummary()}`,
-      `${messages.statusLabels.pressure}: ${String(context.pressureTokens ?? 'unknown')}`,
-      `${messages.statusLabels.projected}: ${String(context.projectedTokens ?? 'unknown')}`,
-      `${messages.statusLabels.system}: ${String(context.systemTokens ?? 'unknown')}`,
-      `${messages.statusLabels.tools}: ${String(context.toolsTokens ?? 'unknown')}`,
-      `${messages.statusLabels.messages}: ${String(context.messageTokens ?? 'unknown')}`,
-      `${messages.statusLabels.tokens}: ${this.state.tokens === undefined
-        ? 'unavailable'
-        : `${String(this.state.tokens.input)} input, ${String(this.state.tokens.output)} output, ${String(this.state.tokens.cacheRead)} cache read`}`,
-    ].join('\n'))
-  }
-
-  private contextSummary(): string {
-    const context = this.state.context
-    if (context === undefined || context.contextWindow === undefined) return 'unavailable'
-    const used = context.projectedTokens ?? context.pressureTokens
-    if (used === undefined) return 'unavailable'
-    const percent = Math.min(100, Math.round(used / context.contextWindow * 100))
-    return `${String(percent)}% (${compactNumber(used)}/${compactNumber(context.contextWindow)})`
+  /** Open `/status` on one tab; the panel reads the live state, so it follows the turn. */
+  private showStatus(tab: StatusTab): void {
+    this.overlay = { kind: 'status', tab }
+    this.requestRender()
   }
 
   /**
@@ -1693,7 +1776,7 @@ export class TuiApp {
         this.requestRender()
       }
     } catch (error) {
-      if (!abort.signal.aborted) this.addError(error)
+      if (!abort.signal.aborted) this.streamFailed(error)
     }
   }
 
@@ -1710,7 +1793,7 @@ export class TuiApp {
         this.requestRender()
       }
     } catch (error) {
-      if (!abort.signal.aborted) this.addError(error)
+      if (!abort.signal.aborted) this.streamFailed(error)
     }
   }
 
@@ -1724,7 +1807,7 @@ export class TuiApp {
         this.requestRender()
       }
     } catch (error) {
-      if (!abort.signal.aborted) this.addError(error)
+      if (!abort.signal.aborted) this.streamFailed(error)
     }
   }
 
@@ -1849,7 +1932,7 @@ export class TuiApp {
     return suggestion.text
   }
 
-  /** Tab on an empty composer: put the shown guess in it, to send or edit. */
+  /** Right or Tab on an empty composer: put the shown guess in it, to send or edit. */
   private takeSuggestion(): boolean {
     const text = this.shownSuggestion()
     if (text === undefined) return false
@@ -2279,6 +2362,9 @@ export class TuiApp {
     this.titleTicker = undefined
     if (this.quotaTimer !== undefined) clearInterval(this.quotaTimer)
     this.quotaTimer = undefined
+    if (this.connectionTrouble !== undefined) clearInterval(this.connectionTrouble)
+    this.connectionTrouble = undefined
+    this.unwatchConnection?.()
     this.followAbort?.abort()
     process.off('SIGTERM', this.onSignal)
     process.off('SIGINT', this.onSignal)
@@ -2695,12 +2781,6 @@ function resolveCompletion(cwd: string, fragment: string): string | undefined {
     void error
   }
   return candidate
-}
-
-function compactNumber(value: number): string {
-  if (value < 1_000) return String(value)
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`
-  return `${(value / 1_000_000).toFixed(value < 10_000_000 ? 1 : 0)}m`
 }
 
 /** Turn stable Host failures into terminal-readable recovery guidance. */

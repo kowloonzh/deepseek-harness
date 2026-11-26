@@ -38,13 +38,14 @@ describe('web host discovery', () => {
       'client-hmr',
       'ui-chat',
       'locale',
-      'session-stats',
       'workspace-changes',
       'job-controller',
       'workspace-controller',
     ]) {
       expect(overlay).toContain(`- id: ${id}\n  disabled: true`)
     }
+    // The TUI reads the whole-Session stats on its status row and the Stats tab of `/status`.
+    expect(overlay).not.toContain('- id: session-stats')
   })
 
   it('uses an ephemeral port and the internal overlay for a self-started host', () => {

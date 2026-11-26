@@ -41,6 +41,14 @@ still required.
 `DSH_URL` connects to an existing host as-is; the internal lean overlay is not
 applied to that host.
 
+A restarted host mints a fresh launch token, so the login a running TUI holds stops
+working. When `DSH_URL_FILE` names a file the host's launcher rewrites with the new
+tokenized URL at each start, a TUI whose connection drops reads that file every second
+and logs in to the new host, then opens the same Session again; the draft and the
+screen stay as they were. Without it the TUI keeps retrying the old URL. Either way the
+status row says the connection is down, and the connection's retry log stays off the
+screen.
+
 On exit, the TUI prints `dsh tui --resume <session-id>` for the active Session.
 `SIGTERM` takes the same path: the alternate screen, mouse tracking, and raw mode
 are restored and the process exits with status 143, so a pane supervisor can stop
@@ -163,12 +171,15 @@ The first version implements:
 - `/help`, `/new`, `/resume`, `/model`, `/compact`, `/status`, and `/exit` (alias `/quit`);
 - queue/steer delivery, pending-message management, and Alt+Up recall;
 - `/queue`, `/retry`, and `/context` for pending input, failed-turn continuation, and context details;
+- `/status` as a tabbed panel (←/→ or Tab switch, Esc closes): Status for the Session's identity and settings, Stats for whole-Session conversation figures, and Context for the context-window breakdown, which `/context` opens directly;
 - command and `@path` completion;
 - tool approvals and `ask_user_question`;
 - grouped tool runs showing counts, names, and running/failed status, with each tool's arguments and output under Ctrl+O;
-- a compact status line with model, reasoning effort, cwd, context, cache share, subscription allowance, and run state; token totals and the permission mode are in `/status`.
+- a compact status line with model, reasoning effort, cwd, context, cache share, whole-Session turns and steps, subscription allowance, and run state; token totals and the permission mode are in `/status`.
 
 The status line shows the web profile's default model before the first prompt and follows live model-selection, token-usage, and execution-state updates from the host. A submitted prompt's acknowledgement does not mark a completed turn as running.
+
+The turn and step counts and the Stats tab come from the Host's `sessionStats` projection, counted over the whole durable log, so paging and compaction leave them alone. The Stats tab shows turns and steps, steps per turn, model time, tool time, average first-token latency, output speed, and the token buckets with the cache hit share — the figures of the Web composer's activity and usage pills. A Host without the `session-stats` plugin leaves the counts off the row, and the tab says so.
 
 Themes, side panels, session trees, worktrees, and alternate agent backends are
 intentionally out of scope.
@@ -185,7 +196,7 @@ The mouse wheel scrolls the conversation transcript. Up/Down remain prompt histo
 
 User messages render as a full-width shaded block while assistant text stays on the normal background. No visible role markers are added, so terminal-native selection copies only the message text.
 
-Enter sends the message to whatever is running: a running turn reads it at its next step boundary, and an idle one starts a turn with it. Ctrl+Enter interrupts that turn first, and Esc only stops things — it closes the open overlay, and otherwise interrupts the turn, sending at once as a new turn any steer messages still waiting for a step boundary. On an idle, empty composer, Esc twice opens backtrack: pick an earlier message with Esc/Up/Down and press Enter to fork the Session from it. Alt+Up recalls the message handed to the running turn so it can be edited before that boundary, Shift+Enter inserts a newline, and Tab completes the slash menu or the draft, or takes the suggested next message shown in an empty composer. `/queue` provides edit and remove actions for the messages awaiting that boundary. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
+Enter sends the message to whatever is running: a running turn reads it at its next step boundary, and an idle one starts a turn with it. Ctrl+Enter interrupts that turn first, and Esc only stops things — it closes the open overlay, and otherwise interrupts the turn, sending at once as a new turn any steer messages still waiting for a step boundary. On an idle, empty composer, Esc twice opens backtrack: pick an earlier message with Esc/Up/Down and press Enter to fork the Session from it. Alt+Up recalls the message handed to the running turn so it can be edited before that boundary, Shift+Enter inserts a newline, and Tab completes the slash menu or the draft. Right (or Tab) takes the suggested next message shown in an empty composer. `/queue` provides edit and remove actions for the messages awaiting that boundary. A prompt stays visible with a `sending` row until the Host accepts it; admission failure restores the draft. Remote failures are classified into quota, rate-limit, timeout, transport, stream, and empty-response guidance.
 
 ## Work items
 
@@ -198,12 +209,13 @@ Checked items are done on this branch; unchecked ones are known follow-ups.
 - [x] `!` lines run as one-shot shell commands.
 - [x] Slash completion for local commands, Host commands, and skills, plus `@path` completion.
 - [x] `/model` chooses the model together with its reasoning effort.
-- [x] Status row with model, cwd, context, cache share, and the magpie subscription allowance.
+- [x] Status row with model, cwd, context, cache share, whole-Session turns and steps, and the magpie subscription allowance.
+- [x] `/status` as tabs (Status, Stats, Context); Stats carries model and tool time, average first-token latency, output speed, and token buckets.
 - [x] Desktop notification and window title when a turn ends or waits for input.
 - [x] The screen opens before the Host is ready, and a prompt typed meanwhile is sent once the Session exists.
 - [x] `/exit` interrupts a running turn before leaving.
-- [x] A resident Host can be reused through `DSH_URL`.
-- [x] Next-prompt suggestion: a dim guess in the empty composer that Tab takes; the TUI keeps its Host plugin entry in the Web profile patch at each launch, idempotently, and `DSH_TUI_SUGGEST=off` turns it off.
+- [x] A resident Host can be reused through `DSH_URL`; after the Host restarts, the TUI logs in to it again through `DSH_URL_FILE` and reopens the Session, keeping the draft.
+- [x] Next-prompt suggestion: a dim guess in the empty composer that Right or Tab takes; the TUI keeps its Host plugin entry in the Web profile patch at each launch, idempotently, and `DSH_TUI_SUGGEST=off` turns it off.
 - [x] A blank row between the title and the conversation.
 - [ ] The Web frontend still lists the `tui-next-prompt` command records the TUI hides (outside `apps/tui`).
 - [ ] Move the suggestion plugin into its own package in a bundle, reached through a Remote service or a projection instead of a Host command.

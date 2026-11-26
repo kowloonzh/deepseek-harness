@@ -130,8 +130,20 @@ export interface QuestionPrompt {
   readonly reject: (error: Error) => void
 }
 
+/** The `/status` panel's tabs, in the order Tab and the arrows walk them. */
+export const STATUS_TABS = ['status', 'stats', 'context'] as const
+
+/** One `/status` tab. */
+export type StatusTab = typeof STATUS_TABS[number]
+
+/** The `/status` panel: tabs over live Session readings, redrawn as they change. */
+export interface StatusPanel {
+  readonly kind: 'status'
+  tab: StatusTab
+}
+
 /** Current modal interaction, if any. */
-export type Overlay = SessionPicker | ModelPicker | QueuePicker | ApprovalPrompt | QuestionPrompt
+export type Overlay = SessionPicker | ModelPicker | QueuePicker | StatusPanel | ApprovalPrompt | QuestionPrompt
 
 /**
  * Flatten a model catalog into picker rows, carrying each route's reasoning depths.

@@ -55,6 +55,29 @@ export interface TokenStatus {
   readonly cacheWrite: number
 }
 
+/**
+ * Whole-Session conversation figures from the Host's `sessionStats` projection, counted over the
+ * durable log so paging and compaction leave them alone. Times are summed wall milliseconds.
+ */
+export interface SessionStats {
+  /** Turns with at least one closed step. */
+  readonly turns: number
+  /** Closed steps, whatever they ended with. */
+  readonly steps: number
+  /** Model time over the steps that assembled a message. */
+  readonly llmMs: number
+  /** Tool time from each call to its result. */
+  readonly toolMs: number
+  /** First-token latency, summed over `ttftSteps`. */
+  readonly ttftMs: number
+  readonly ttftSteps: number
+  /** Decode time and output tokens over the steps reporting usage. */
+  readonly decodeMs: number
+  readonly decodeTokens: number
+}
+
+const SESSION_STATS_KEYS = ['turns', 'steps', 'llmMs', 'toolMs', 'ttftMs', 'ttftSteps', 'decodeMs', 'decodeTokens'] as const
+
 /** Model identity shown in the status line. */
 export interface ModelStatus {
   readonly provider: string
@@ -100,6 +123,8 @@ export interface TranscriptState {
   items: TranscriptItem[]
   model?: ModelStatus | undefined
   tokens?: TokenStatus | undefined
+  /** Undefined while the Host serves no `sessionStats` value (the plugin is not mounted). */
+  stats?: SessionStats | undefined
   context?: ContextStatus | undefined
   permission?: string | undefined
   retryAvailable?: boolean | undefined
@@ -203,6 +228,7 @@ function applyProjectionValues(state: TranscriptState, values: unknown): Transcr
   const output = usage === undefined ? undefined : numberValue(usage.outputTokens)
   const cacheRead = usage === undefined ? undefined : numberValue(usage.cacheReadTokens)
   const cacheWrite = usage === undefined ? undefined : numberValue(usage.cacheWriteTokens)
+  const stats = sessionStats(values.sessionStats)
   const limitsValue = recordValue(values.imageLimits)
   const maxImageBytes = limitsValue === undefined ? undefined : numberValue(limitsValue.maxImageBytes)
   const maxImagesPerMessage = limitsValue === undefined ? undefined : numberValue(limitsValue.maxImagesPerMessage)
@@ -224,6 +250,7 @@ function applyProjectionValues(state: TranscriptState, values: unknown): Transcr
     ...(input === undefined || output === undefined
       ? {}
       : { tokens: { input, output, cacheRead: cacheRead ?? 0, cacheWrite: cacheWrite ?? 0 } }),
+    ...(stats === undefined ? {} : { stats }),
     ...(maxImageBytes === undefined || maxImagesPerMessage === undefined || maxMessageImageBytes === undefined
       ? {}
       : { imageLimits: { maxImageBytes, maxImagesPerMessage, maxMessageImageBytes } }),
@@ -243,6 +270,18 @@ function applyProjectionValues(state: TranscriptState, values: unknown): Transcr
     ...(retryAvailable === undefined ? {} : { retryAvailable }),
     queue,
   }
+}
+
+function sessionStats(value: unknown): SessionStats | undefined {
+  const record = recordValue(value)
+  if (record === undefined) return undefined
+  const stats: Partial<Record<keyof SessionStats, number>> = {}
+  for (const key of SESSION_STATS_KEYS) {
+    const number = numberValue(record[key])
+    if (number === undefined) return undefined
+    stats[key] = number
+  }
+  return stats as SessionStats
 }
 
 function contextNumber(

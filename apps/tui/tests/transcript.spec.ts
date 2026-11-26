@@ -48,6 +48,17 @@ describe('terminal transcript projection', () => {
     })).toBe(next)
   })
 
+  it('reads whole-Session stats and ignores a malformed value', () => {
+    const state = { ...initialTranscript(), sessionId }
+    const value = { turns: 3, steps: 9, llmMs: 4000, toolMs: 1500, ttftMs: 2400, ttftSteps: 8, decodeMs: 2000, decodeTokens: 120 }
+    const next = applyControlFrame(state, { type: 'projection', sessionId, seq: 2, changes: [{ key: 'sessionStats', val: value }] })
+    expect(next.stats).toEqual(value)
+    const broken = applyControlFrame(next, {
+      type: 'projection', sessionId, seq: 3, changes: [{ key: 'sessionStats', val: { turns: 4 } }],
+    })
+    expect(broken.stats).toEqual(value)
+  })
+
   it('projects live queue rows and completion state from Session state', () => {
     const state = { ...initialTranscript(), sessionId }
     const next = applySessionState(state, {

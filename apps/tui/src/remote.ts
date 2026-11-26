@@ -149,6 +149,20 @@ export class TuiRemoteClient {
     )
   }
 
+  /** Whether the live Remote carrier is up; undefined before its first outcome. */
+  connectionState(): 'connected' | 'connecting' | 'disconnected' | undefined {
+    return this.context.connection.state.getSnapshot()
+  }
+
+  /**
+   * Follow carrier state changes.
+   * @param listener - called after each change.
+   * @returns a function that stops following.
+   */
+  onConnectionState(listener: () => void): () => void {
+    return this.context.connection.state.subscribe(listener)
+  }
+
   /** List durable Sessions without resuming an Agent. */
   async listSessions(): Promise<readonly SessionSummary[]> {
     return unwrap(await this.context.remote.session.list({}), 'session list').items

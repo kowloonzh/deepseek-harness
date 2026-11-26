@@ -37,6 +37,8 @@ DSH_URL='http://127.0.0.1:3080/?token=...' dsh tui
 
 `DSH_URL` 会按原样连接已有 host；内部精简 overlay 不会应用到该 host。
 
+host 重启后会生成新的 launch token，正在运行的 TUI 持有的登录随之失效。如果 `DSH_URL_FILE` 指向一个文件，host 的启动脚本每次启动都会把新的带 token URL 写入其中，那么连接断开的 TUI 会每秒读取这个文件，登录新的 host 并重新打开同一个会话，草稿和界面保持不变。未设置时，TUI 会继续重试旧 URL。无论哪种情况，状态栏都会提示连接已断开，连接库的重试日志不会打到屏幕上。
+
 退出时会打印当前 Session 的恢复命令：`dsh tui --resume <session-id>`。
 `SIGTERM` 走同一路径：恢复 alternate screen、鼠标追踪和 raw 模式，并以退出码
 143 结束，因此 pane 管理器停掉 worker 时不会留下卡死的终端。
@@ -150,12 +152,15 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 - `/help`、`/new`、`/resume`、`/model`、`/compact`、`/status` 和 `/exit`（别名 `/quit`）；
 - queue/steer 投递、待处理消息管理和 Alt+Up 召回；
 - `/queue`、`/retry` 和 `/context`，分别管理待处理输入、继续失败轮次和查看上下文明细；
+- `/status` 是分页签面板（←/→ 或 Tab 切换，Esc 关闭）：Status 页显示会话标识和设置，Stats 页显示整个会话的对话统计，Context 页显示上下文窗口明细，`/context` 直接打开该页；
 - 命令和 `@path` 补全；
 - 工具审批和 `ask_user_question`；
 - 连续工具调用分组显示数量、名称和 running/failed 状态，Ctrl+O 展开每个工具的完整参数与输出；
-- 显示模型、reasoning effort、工作目录、上下文、缓存命中率、订阅额度和运行状态的紧凑状态栏；token 总量和权限模式在 `/status` 中查看。
+- 显示模型、reasoning effort、工作目录、上下文、缓存命中率、整个会话的轮数和步数、订阅额度和运行状态的紧凑状态栏；token 总量和权限模式在 `/status` 中查看。
 
 状态栏在首次发送前显示 web profile 的默认模型，并跟随 host 实时更新的模型选择、token 用量和执行状态。已提交提示词的确认响应不会把已结束的轮次重新标为运行中。
+
+轮数、步数和 Stats 页来自 Host 的 `sessionStats` projection，按完整的持久日志统计，翻页和压缩都不影响。Stats 页显示轮数和步数、每轮步数、模型用时、工具用时、首 token 平均用时、输出速度，以及各类 token 用量和缓存命中率，与 Web 输入框上方的活动和用量胶囊一致。Host 没有挂载 `session-stats` 插件时，状态栏不显示轮数和步数，Stats 页会给出说明。
 
 主题、侧面板、会话树、工作树和其他 agent 后端暂不在功能范围内。
 
@@ -171,7 +176,7 @@ node -v; command -v dsh; readlink -f "$(command -v dsh)"
 
 用户消息使用整行底色块，助手正文保持普通背景。界面不渲染可见角色标记，终端原生选择复制时只包含消息正文。
 
-Enter 把消息交给正在运行的东西：运行中的回合会在下一个步骤边界读到它，空闲时它会开启新回合。Ctrl+Enter 会先中断该回合，Esc 只负责停止——有浮层时关闭浮层，否则中断回合，并把仍在等待步骤边界的 steer 消息立即作为新回合发出。输入框为空且空闲时连按两次 Esc 进入回溯：用 Esc/上/下选择更早的消息，按 Enter 从该消息分叉会话。Alt+Up 把交给运行中回合的那条消息召回，可在边界到来前修改；Shift+Enter 插入换行，Tab 用于补全斜杠菜单或草稿，或填入空输入框中显示的下一条输入建议。`/queue` 支持编辑和删除仍在等待该边界的消息。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
+Enter 把消息交给正在运行的东西：运行中的回合会在下一个步骤边界读到它，空闲时它会开启新回合。Ctrl+Enter 会先中断该回合，Esc 只负责停止——有浮层时关闭浮层，否则中断回合，并把仍在等待步骤边界的 steer 消息立即作为新回合发出。输入框为空且空闲时连按两次 Esc 进入回溯：用 Esc/上/下选择更早的消息，按 Enter 从该消息分叉会话。Alt+Up 把交给运行中回合的那条消息召回，可在边界到来前修改；Shift+Enter 插入换行，Tab 用于补全斜杠菜单或草稿。右箭头（或 Tab）填入空输入框中显示的下一条输入建议。`/queue` 支持编辑和删除仍在等待该边界的消息。提示词在 Host 接受前保持可见并显示 `sending` 行；准入失败会保留草稿。Remote 失败会按 quota、rate limit、timeout、transport、stream 和 empty response 分类给出提示。
 
 ## 工单清单
 
@@ -184,12 +189,13 @@ Enter 把消息交给正在运行的东西：运行中的回合会在下一个�
 - [x] `!` 开头的行作为一次性 shell 命令运行。
 - [x] 斜杠补全覆盖本地命令、Host 命令和 skill，并支持 `@path` 补全。
 - [x] `/model` 同时选择模型和推理强度。
-- [x] 状态行显示模型、cwd、上下文、缓存命中率和 magpie 订阅额度。
+- [x] 状态行显示模型、cwd、上下文、缓存命中率、整个会话的轮数和步数，以及 magpie 订阅额度。
+- [x] `/status` 改为分页签（Status、Stats、Context）；Stats 页包含模型和工具用时、首 token 平均用时、输出速度和 token 分项。
 - [x] 轮次结束或等待输入时发送桌面通知并更新窗口标题。
 - [x] Host 就绪前先打开界面，期间输入的消息在会话建立后发送。
 - [x] `/exit` 先中断运行中的轮次再退出。
-- [x] 可以通过 `DSH_URL` 复用常驻 Host。
-- [x] 下一条输入建议：空输入框中灰显模型的猜测，按 Tab 填入；TUI 每次启动时幂等地在 Web profile patch 中维护其 Host 插件条目，`DSH_TUI_SUGGEST=off` 可关闭。
+- [x] 可以通过 `DSH_URL` 复用常驻 Host；Host 重启后，TUI 通过 `DSH_URL_FILE` 重新登录并重新打开会话，草稿保留。
+- [x] 下一条输入建议：空输入框中灰显模型的猜测，按右箭头或 Tab 填入；TUI 每次启动时幂等地在 Web profile patch 中维护其 Host 插件条目，`DSH_TUI_SUGGEST=off` 可关闭。
 - [x] 标题和对话之间留一个空行。
 - [ ] Web 前端仍会显示 TUI 已隐藏的 `tui-next-prompt` 命令记录（不在 `apps/tui` 范围内）。
 - [ ] 把建议插件移到 bundle 中的独立包，改用 Remote 服务或 projection 而不是 Host 命令。

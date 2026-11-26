@@ -10,10 +10,12 @@ import type {
   QuestionPrompt,
   SlashSuggestion,
 } from './ui.ts'
+import { STATUS_TABS } from './ui.ts'
 import type { ClipboardImage } from './clipboard.ts'
 import { highlightCode, highlightCommand } from './highlight.ts'
 import { formatQuota, type QuotaWindow } from './quota.ts'
 import { messages } from './locale.ts'
+import { activityReading, statusTabContent } from './status-panel.ts'
 import type {
   TranscriptItem,
   TranscriptState,
@@ -29,6 +31,7 @@ const CYAN = `${ESC}36m`
 const YELLOW = `${ESC}33m`
 const RED = `${ESC}31m`
 const GREEN = `${ESC}32m`
+const REVERSE = `${ESC}7m`
 const ITALIC = `${ESC}3m`
 /** Columns left of the transcript; codex starts each cell's gutter at the edge. */
 const TRANSCRIPT_LEFT_PADDING = 0
@@ -331,7 +334,7 @@ export class TerminalRenderer {
       : []
     const flexible = options.overlay === undefined
       ? [...indicator, ...queueDockLines(options.state.queue, options.submission, width, above - indicator.length)]
-      : overlayLines(options.overlay, width, above).slice(0, above)
+      : overlayLines(options.overlay, width, above, options).slice(0, above)
     const pane = [...flexible, ...composer.lines]
     const cursor = { line: flexible.length + composer.cursorLine, column: composer.cursorColumn }
     const bottomRows = pane.length + STATUS_ROWS
@@ -1620,19 +1623,19 @@ function statusRow(
     : `${state.model.model}${state.model.reasoningEffort === undefined ? '' : ` ${state.model.reasoningEffort}`}`
   const context = contextPercent(state)
   const cache = cacheHitPercent(state.tokens)
+  const activity = activityReading(state.stats)
   // codex's footer status line: segments joined by a dim ` · `, each in its accent color (model
-  // and state cyan, path and usage green). Token totals and the permission mode live in
-  // `/status`; the running tool already has its own card and the status indicator.
+  // cyan, path and usage green). The run state is on the title row, not here. Token totals and
+  // the permission mode live in `/status`; the running tool already has its own card and the status indicator.
   const segments: StatusSegment[] = [
     ...(model === undefined ? [] : [{ text: model, style: CYAN }]),
     { text: shortenHome(state.cwd), style: GREEN, shrinks: true },
     ...(context === undefined ? [] : [{ text: context, style: GREEN }]),
     ...(cache === undefined ? [] : [{ text: `cache ${String(cache)}%`, style: GREEN }]),
+    // Whole-Session turns and steps; the times behind them are on the Stats tab of `/status`.
+    ...(activity === undefined ? [] : [{ text: activity, style: GREEN, drops: true }]),
     // Subscription allowance left, yellow once a window runs low and red when nearly gone.
     ...(allowance === undefined ? [] : [{ text: allowance, style: lowest < 5 ? RED : lowest < 20 ? YELLOW : GREEN }]),
-    // The run state is one paired reading: showing only the running half made an idle
-    // terminal look like a frame that had failed to paint its tail.
-    { text: state.running ? messages.running : messages.idle, style: state.running ? CYAN : DIM },
     ...(reading ? [{ text: messages.readingHint, style: DIM }] : []),
   ]
   if (notice === undefined || notice === '') return statusSegments(segments, width)
@@ -1646,13 +1649,15 @@ interface StatusSegment {
   readonly style: string
   /** Gives up its width first when the row is too narrow (the working directory). */
   readonly shrinks?: boolean
+  /** Left out when the row is still too narrow after the shrinkable one gave way. */
+  readonly drops?: boolean
 }
 
 const STATUS_SEPARATOR = ' · '
 
 /**
  * Paint status segments into one row, shortening the shrinkable one before anything else so the
- * run state and the reading hint at the end stay visible.
+ * readings after it, the reading hint among them, stay visible.
  * @param segments - the readings, left to right.
  * @param width - columns available.
  * @returns the styled row.
@@ -1669,6 +1674,7 @@ function statusSegments(segments: readonly StatusSegment[], width: number): stri
       ? kept.map((segment, index) => index === shrinkable ? { ...segment, text: fit(segment.text, room) } : segment)
       : kept.filter((_, index) => index !== shrinkable)
   }
+  if (total() > width) kept = kept.filter(segment => segment.drops !== true)
   if (total() > width) return `${DIM}${fit(kept.map(segment => segment.text).join(STATUS_SEPARATOR), width)}${RESET}`
   return kept.map(segment => `${segment.style}${segment.text}${RESET}`).join(`${DIM}${STATUS_SEPARATOR}${RESET}`)
 }
@@ -1736,8 +1742,10 @@ function composerLines(
   }
 }
 
-function overlayLines(overlay: Overlay, width: number, height: number): string[] {
+function overlayLines(overlay: Overlay, width: number, height: number, view: RenderViewOptions): string[] {
   switch (overlay.kind) {
+    case 'status':
+      return statusPanelLines(overlay, width, height, view)
     case 'sessions':
       return sessionOverlayLines(overlay, width, height)
     case 'models':
@@ -1757,6 +1765,44 @@ function overlayLines(overlay: Overlay, width: number, height: number): string[]
     case 'question':
       return questionLines(overlay, width)
   }
+}
+
+/**
+ * The `/status` panel: a tab bar, the tab's aligned rows, and the key hint. The rows are read from
+ * the frame's live state, so the figures move while a turn runs.
+ */
+function statusPanelLines(
+  overlay: Extract<Overlay, { kind: 'status' }>,
+  width: number,
+  height: number,
+  view: RenderViewOptions,
+): string[] {
+  const tabs = STATUS_TABS.map((tab) => {
+    const name = ` ${messages.statusTabs[tab]} `
+    return tab === overlay.tab ? `${CYAN}${BOLD}${REVERSE}${name}${RESET}` : `${DIM}${name}${RESET}`
+  }).join(' ')
+  const content = statusTabContent(overlay.tab, view.state, { columns: view.columns, rows: view.rows })
+  const body = 'empty' in content
+    ? [`${DIM}${fit(content.empty, width - 2)}${RESET}`]
+    : panelRows(content.rows, width)
+  // Rows that do not fit give way before the tab bar and the hint, which say how to get out.
+  const room = Math.max(0, height - 4)
+  return [
+    fitAnsi(tabs, width),
+    '',
+    ...body.slice(0, room),
+    '',
+    `${DIM}${fit(messages.statusPanelHint, width)}${RESET}`,
+  ]
+}
+
+function panelRows(rows: readonly { readonly label: string; readonly value: string }[], width: number): string[] {
+  const labelWidth = Math.max(...rows.map(row => displayWidth(row.label)))
+  return rows.map((row) => {
+    const label = `${row.label}${' '.repeat(labelWidth - displayWidth(row.label))}`
+    const valueWidth = Math.max(1, width - labelWidth - 4)
+    return `  ${DIM}${label}${RESET}  ${fit(row.value, valueWidth)}`
+  })
 }
 
 function queueOverlayLines(
