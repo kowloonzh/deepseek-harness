@@ -262,6 +262,19 @@ describe('terminal prompt lifecycle', () => {
         await expect.poll(() => draftText(app)).toBe('/help')
         input.write('\u001b[B')
         await expect.poll(() => draftText(app)).toBe('')
+
+        // Wheel back through the transcript: the gap above the composer shows codex's
+        // "back to bottom" control, and a click on it returns to the latest rows.
+        const control = (): { readonly row: number; readonly column: number } | undefined => {
+          const lines = app?.screenLines() ?? []
+          const row = lines.findIndex(line => line.includes('Back to bottom'))
+          return row < 0 ? undefined : { row: row + 1, column: (lines[row]?.indexOf('Back') ?? 0) + 1 }
+        }
+        for (let step = 0; step < 6; step += 1) input.write('\u001b[<64;10;5M')
+        await expect.poll(control).toBeDefined()
+        const at = control()
+        input.write(`\u001b[<0;${String(at?.column)};${String(at?.row)}M\u001b[<0;${String(at?.column)};${String(at?.row)}m`)
+        await expect.poll(control).toBeUndefined()
       } finally {
         // Ctrl+U first, so a draft a failed step left behind cannot swallow `/quit`.
         input.write('\u0015/quit\r')

@@ -345,7 +345,7 @@ describe('terminal rendering', () => {
 
     const scrolled = frame(false, 3)
     expect(scrolled).toContain('Searching news')
-    expect(scrolled).toContain('↓ bottom · Esc')
+    expect(scrolled).toContain('↓ Back to bottom · esc')
   })
 
   it('keeps reasoning out of the conversation and shows its latest line in the status row', () => {
@@ -884,7 +884,19 @@ describe('terminal rendering', () => {
       frame.selectionRegion?.rows.find(row => row.trim() !== '')?.trim()
     const pinned = topText(reading)
     expect(reading.position.kind).toBe('reading')
-    expect(stripAnsi(reading.text)).toContain('↓ bottom · Esc')
+    // Reading back draws codex's clickable control centred in the gap row above the composer,
+    // and the status row drops its own hint; at the bottom the control is gone.
+    const control = reading.followControl
+    expect(control).toBeDefined()
+    const controlRow = stripAnsi(reading.text).split(/\r?\n/u)[(control?.row ?? 0) - 1] ?? ''
+    expect(controlRow.trim()).toBe('↓ Back to bottom · esc')
+    expect(controlRow.slice((control?.start ?? 0) - 1, control?.end).trim()).toBe('↓ Back to bottom · esc')
+    expect(stripAnsi(reading.text)).not.toContain('↓ bottom · Esc')
+    expect(latest.followControl).toBeUndefined()
+    expect(stripAnsi(latest.text)).not.toContain('Back to bottom')
+    // A terminal too narrow for the long label gets a shorter one.
+    const slim = renderer.render({ ...options, columns: 22, scroll: back })
+    expect(stripAnsi(slim.text)).toContain('↓ Bottom ')
 
     // New replies stream in below: a row count from the bottom would slide, the anchor does not.
     const grown = { ...state, items: [...state.items, reply(30), reply(31), reply(32)] }

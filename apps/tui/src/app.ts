@@ -206,6 +206,8 @@ export class TuiApp {
   private draftImages: ClipboardImage[] = []
   private history: string[] = []
   private historyIndex = 0
+  /** A left press landed on the "back to bottom" control and has not been released yet. */
+  private followPressed = false
   private overlay: Overlay | undefined
   private readonly queuedInteractions: Array<ApprovalPrompt | QuestionPrompt> = []
   /** Where the transcript view sits; a reading position stays on its content as rows arrive. */
@@ -2290,6 +2292,7 @@ export class TuiApp {
   }
 
   private handleMouse(mouse: MouseInput): void {
+    if (this.handleFollowControl(mouse)) return
     const region = this.lastFrame?.selectionRegion
     if (region === undefined) {
       this.clearSelection()
@@ -2331,6 +2334,32 @@ export class TuiApp {
       this.positionBeforePress = undefined
       this.requestRender()
     }
+  }
+
+  /**
+   * The "back to bottom" control, as codex's: a left press on it arms it, and releasing on it
+   * returns to the latest rows. Hidden controls take no input.
+   * @param mouse - the decoded mouse event.
+   * @returns whether the control consumed the event.
+   */
+  private handleFollowControl(mouse: MouseInput): boolean {
+    const control = this.lastFrame?.followControl
+    const inside = control !== undefined
+      && mouse.row === control.row && mouse.column >= control.start && mouse.column <= control.end
+    if (mouse.action === 'down' && mouse.button === 'left' && inside) {
+      this.followPressed = true
+      return true
+    }
+    if (!this.followPressed) return false
+    if (mouse.action === 'up') {
+      this.followPressed = false
+      if (inside) {
+        this.selection = undefined
+        this.position = LATEST
+        this.requestRender()
+      }
+    }
+    return true
   }
 
   private clampSelectionPoint(

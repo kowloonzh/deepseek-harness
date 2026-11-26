@@ -69,6 +69,8 @@ export interface RenderedFrame {
   readonly cursorRow: number
   readonly cursorColumn: number
   readonly selectionRegion: RenderedSelectionRegion | undefined
+  /** Where the "back to bottom" control was drawn, for a click to hit; undefined when hidden. */
+  readonly followControl?: FollowControl | undefined
   /** Rows the transcript area holds this frame; a page scroll moves by one fewer. */
   readonly transcriptRows: number
   /** Where this frame's transcript view sits, resolved against what it showed. */
@@ -137,6 +139,17 @@ const SLASH_MENU_ROWS = 6
 export function bottomPaneLimit(area: number): number {
   return Math.min(area, Math.max(8, Math.floor(area * 2 / 3)))
 }
+
+/** The clickable "back to bottom" control: one screen row and a 1-based column span. */
+export interface FollowControl {
+  readonly row: number
+  readonly start: number
+  readonly end: number
+}
+
+/** Longest first, as codex's follow control shortens to fit. */
+const FOLLOW_LABELS = [' ↓ Back to bottom · esc ', ' ↓ Bottom · esc ', ' ↓ Bottom ', ' ↓ '] as const
+const FOLLOW_STYLE = `${ESC}96m${ESC}48;5;238m`
 
 /** How many rows each section of one frame occupies. */
 interface FrameLayout {
@@ -377,7 +390,26 @@ export class TerminalRenderer {
       if (row < shown.length) shown[row] = ''
     }
 
-    const status = statusLine(options.state, width, options.notice, position.kind === 'reading', options.quota ?? [], options.now ?? Date.now())
+    // Reading back: codex's return-to-latest control, centred in the gap above the composer.
+    // It stays out of a selection in progress and from under the slash menu.
+    let followControl: FollowControl | undefined
+    if (position.kind === 'reading' && gapRows > 0 && menuRows === 0 && options.selection === undefined) {
+      const label = FOLLOW_LABELS.find(text => displayWidth(text) <= width)
+      if (label !== undefined) {
+        const labelWidth = displayWidth(label)
+        const left = Math.floor((width - labelWidth) / 2)
+        conversation[conversation.length - 1] = `${' '.repeat(left)}${FOLLOW_STYLE}${label}${RESET}`
+        followControl = { row: headerHeight + conversation.length, start: left + 1, end: left + labelWidth }
+      }
+    }
+    const status = statusLine(
+      options.state,
+      width,
+      options.notice,
+      position.kind === 'reading' && followControl === undefined,
+      options.quota ?? [],
+      options.now ?? Date.now(),
+    )
     const lines = [
       fitAnsi(header, width),
       ...Array.from({ length: headerHeight - 1 }, () => ''),
@@ -403,6 +435,7 @@ export class TerminalRenderer {
         total: lines.length,
       },
       selectionRegion: { top: headerHeight + 1, rows: shown },
+      followControl,
     }
   }
 

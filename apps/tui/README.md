@@ -193,7 +193,7 @@ Invoke a user-invocable skill with `/<skill-name> [arguments]`. Unmatched slash 
 
 Typing `/` opens completion for local TUI commands, Host commands, and user-invocable skills. Use Up/Down to choose, Tab to complete, or Enter to run the selected item.
 
-The mouse wheel scrolls the conversation transcript. Up/Down remain prompt history and multiline navigation. Drag-select transcript text with the left mouse button, then press `Ctrl+C` to copy the selection.
+The mouse wheel scrolls the conversation transcript. While reading back, a `↓ Back to bottom · esc` control sits centred above the composer, as in codex: click it, or press Esc or Ctrl+End, to return to the latest rows. Up/Down remain prompt history and multiline navigation. Drag-select transcript text with the left mouse button, then press `Ctrl+C` to copy the selection.
 
 User messages render as a full-width shaded block while assistant text stays on the normal background. No visible role markers are added, so terminal-native selection copies only the message text.
 
