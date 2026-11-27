@@ -1,37 +1,166 @@
-# Publish the standalone `@kowloonzh/dsh-tui` npm package (apps/tui) from this fork.
+# Keep the standalone `@kowloonzh/dsh-tui` npm package (apps/tui) on upstream releases, and
+# publish it.
 #
-# Not an upstream workflow: it lives only on the fork's `feat/dsh-tui-profile` branch, and
-# `apps/tui/tests/fork-boundary.spec.ts` allows exactly this file under .github/.
+# Not an upstream workflow: it lives only on the fork's `feat/dsh-tui-profile` branch (the
+# fork's default branch, which scheduled runs need), and `apps/tui/tests/fork-boundary.spec.ts`
+# allows exactly this file under .github/.
 #
-# Release: bump `release` in apps/tui/standalone/package.json (or sync onto a new Host
-# version), commit, push, then push the tag `dsh-tui-v<version>`, for example
-# `dsh-tui-v0.2.3-alpha.2.tui.2`. The job packs, installs the tarball into an empty directory
-# and starts it, and only then publishes.
+# sync (daily, or a manual run with `sync`): when upstream has tagged a newer `dsh-v<version>`
+#   that npm carries, rebase the branch onto that tag, set apps/tui's version to it and the
+#   standalone `release` to 1, build, run the TUI suite, then push the branch, move
+#   `my-last-sync`, and push the tag `dsh-tui-v<package version>`. Pushing with the SYNC_TOKEN
+#   secret (a fine-grained token with Contents and Workflows write on this repository; the
+#   rebase carries upstream workflow changes, which GITHUB_TOKEN may not push) also makes that
+#   tag start the publish job below. A conflict or failing test pushes nothing; the run fails,
+#   and an issue is opened when the repository has issues enabled.
 #
-# No npm token: npm trusts this workflow through OIDC (Trusted Publishing, configured on the
-# package's npm settings page for kowloonzh/deepseek-harness and `dsh-tui-publish.yml`), and
-# the publish carries a provenance attestation. A manual run packs and verifies but never
-# publishes.
+# publish (a `dsh-tui-v*` tag, or a manual run without `sync`): compile the workspace, pack,
+#   refuse a tag that does not name the packed version, install and start the tarball, and
+#   publish through npm Trusted Publishing (OIDC, with provenance): no npm token, login, or 2FA
+#   prompt. A manual run packs and verifies without publishing.
+#
+# A TUI-only release: bump `release` in apps/tui/standalone/package.json, commit, push, and push
+# the tag `dsh-tui-v<version>`, for example `dsh-tui-v0.2.3-alpha.2.tui.2`.
 
 name: dsh-tui publish
 
 on:
   push:
     tags: ['dsh-tui-v*']
+  schedule:
+    - cron: '17 2 * * *'   # daily, 10:17 Beijing time
   workflow_dispatch:
+    inputs:
+      sync:
+        description: Sync onto the newest upstream release (otherwise pack and verify only)
+        type: boolean
+        default: false
+      rehearse:
+        description: With sync and no newer release, rebuild and test the current one; push nothing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: dsh-tui-publish
-  cancel-in-progress: false
+env:
+  BRANCH: feat/dsh-tui-profile
+  LEFTHOOK: '0'   # the workspace installs git hooks; CI runs its own checks
 
 jobs:
+  sync:
+    if: >-
+      github.repository == 'kowloonzh/deepseek-harness'
+      && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.sync))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: dsh-tui-sync
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '^24.22.3'
+      - uses: pnpm/action-setup@v5.0.0
+      - name: Find a newer upstream release
+        id: find
+        run: |
+          git remote add upstream https://github.com/deepseek-ai/deepseek-harness.git
+          git fetch --no-tags upstream '+refs/tags/dsh-v*:refs/tags/dsh-v*'
+          pnpm install --frozen-lockfile
+          current=$(jq -r .version package.json)
+          next=$(pnpm exec tsx apps/tui/scripts/upstream-release.ts "$current")
+          rehearse=false
+          if [ -z "$next" ] && [ "${{ inputs.rehearse || false }}" = true ]; then
+            next=$current
+            rehearse=true
+          fi
+          echo "rehearse=$rehearse" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "$rehearse" = true ]; then
+            echo "Rehearsal on dsh-v$current: rebase, build, and test; nothing is pushed." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -z "$next" ]; then
+            echo "Up to date with upstream dsh $current." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Syncing from dsh $current to dsh-v$next." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Rebase onto the release and follow its version
+        if: steps.find.outputs.next != ''
+        env:
+          NEXT: ${{ steps.find.outputs.next }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898283+github-actions[bot]@users.noreply.github.com'
+          if ! git rebase "dsh-v$NEXT"; then
+            git status --short | head -50
+            git rebase --abort
+            echo "::error::rebasing $BRANCH onto dsh-v$NEXT conflicts; resolve it locally"
+            exit 1
+          fi
+          (cd apps/tui && npm pkg set version="$NEXT")
+          jq '.release = 1' apps/tui/standalone/package.json > "$RUNNER_TEMP/standalone.json"
+          mv "$RUNNER_TEMP/standalone.json" apps/tui/standalone/package.json
+          git add apps/tui/package.json apps/tui/standalone/package.json
+          git diff --cached --quiet || git commit -m "chore(tui): follow upstream dsh-v$NEXT"
+      - name: Build
+        if: steps.find.outputs.next != ''
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build:artifacts
+      - name: Test the TUI
+        if: steps.find.outputs.next != ''
+        env:
+          NEXT: ${{ steps.find.outputs.next }}
+        run: |
+          # fork-boundary diffs against upstream/master; here the baseline is the release tag.
+          git update-ref refs/remotes/upstream/master "dsh-v$NEXT"
+          pnpm exec vitest run apps/tui
+      - name: Push the branch and the release tag
+        if: steps.find.outputs.next != '' && steps.find.outputs.rehearse != 'true'
+        id: push
+        env:
+          NEXT: ${{ steps.find.outputs.next }}
+          BASE: ${{ steps.find.outputs.base }}
+        run: |
+          pnpm --filter @deepseek-ai/dsh-tui-app run pack:standalone
+          version=$(jq -r .version dist/standalone/package/package.json)
+          git push --force-with-lease="$BRANCH:$BASE" origin "HEAD:$BRANCH"
+          git tag -f -a my-last-sync "dsh-v$NEXT" -m "Last upstream sync: dsh-v$NEXT"
+          git push -f origin my-last-sync
+          git tag "dsh-tui-v$version"
+          git push origin "dsh-tui-v$version"
+          echo "Pushed $BRANCH and dsh-tui-v$version; the tag starts the publish run." >> "$GITHUB_STEP_SUMMARY"
+      - name: Report a failed sync
+        if: failure() && steps.find.outputs.next != '' && steps.find.outputs.rehearse != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.find.outputs.next }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "dsh-tui: syncing onto dsh-v$NEXT failed" \
+            --body "The daily sync could not move $BRANCH onto upstream dsh-v$NEXT; nothing was pushed or published. See $RUN"
+
   publish:
-    if: github.repository == 'kowloonzh/deepseek-harness'
+    if: >-
+      github.repository == 'kowloonzh/deepseek-harness'
+      && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.sync))
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    concurrency:
+      group: dsh-tui-publish
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write   # OIDC for npm Trusted Publishing and provenance

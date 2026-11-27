@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url'
 import semver from 'semver'
 import { afterEach, describe, expect, it } from 'vitest'
 import { importedPackages, standaloneDependencies, standaloneVersion } from '../scripts/pack-standalone.ts'
+import { upstreamRelease } from '../scripts/upstream-release.ts'
 import { resolveDshEntrypoint } from '../src/standalone.ts'
 
 describe('standalone package', () => {
@@ -63,6 +64,16 @@ describe('standalone package', () => {
     expect([...ordered].reverse().sort(semver.compare)).toEqual(ordered)
     // A plain range never picks a TUI prerelease by accident; users install by dist-tag.
     expect(semver.satisfies('0.2.3-tui.1', '^0.2.3')).toBe(false)
+  })
+
+  it('syncs onto the newest upstream release that is tagged and on npm', () => {
+    const tags = ['dsh-v0.2.3-alpha.2', 'dsh-v0.2.3-alpha.3', 'dsh-v0.2.3', 'dsh-v0.2.4-alpha.1', 'desktop-v9.0.0', 'dsh-vbad']
+    expect(upstreamRelease('0.2.3-alpha.2', tags, ['0.2.3-alpha.2', '0.2.3-alpha.3', '0.2.3'])).toBe('0.2.3')
+    // Tagged but not yet on npm: the standalone package could not pin it.
+    expect(upstreamRelease('0.2.3', tags, ['0.2.3'])).toBeUndefined()
+    expect(upstreamRelease('0.2.3', tags, ['0.2.3', '0.2.4-alpha.1'])).toBe('0.2.4-alpha.1')
+    // On npm without an upstream tag: there is no commit to rebase onto.
+    expect(upstreamRelease('0.2.3', ['dsh-v0.2.3'], ['0.2.3', '0.2.5'])).toBeUndefined()
   })
 
   it('finds the dsh executable of the installed Host package', () => {

@@ -101,6 +101,14 @@ git diff --stat my-last-sync..upstream/master -- apps/tui  # empty means no TUI 
 
 ### Upgrading to a new upstream tag
 
+On the fork, `.github/workflows/dsh-tui-publish.yml` does this every day: when upstream has
+tagged a newer `dsh-v<version>` that npm carries, it rebases the branch onto the tag, follows
+the version, builds, runs the TUI suite, pushes, and tags `dsh-tui-v…`, which publishes the
+standalone package. A conflict or failing test pushes nothing and fails the run; then sync by
+hand as below. After an automatic sync, `git pull --rebase` before continuing locally. A manual
+run with `sync` and `rehearse` rehearses on the current release without pushing.
+
+
 Every upstream sync needs all three steps in this order. Skipping either build
 step makes the TUI integration tests fail against the new upstream code.
 

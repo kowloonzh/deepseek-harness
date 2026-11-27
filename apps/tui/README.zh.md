@@ -84,6 +84,13 @@ git diff --stat my-last-sync..upstream/master -- apps/tui  # empty means no TUI 
 
 ### 升级到新的 upstream tag
 
+在 fork 上，`.github/workflows/dsh-tui-publish.yml` 每天自动完成这件事：upstream 打了更新的 `dsh-v<version>`
+且 npm 上已发布该版本时，它把分支 rebase 到该 tag，同步版本号，构建并运行 TUI 测试，然后推送分支并打
+`dsh-tui-v…` tag，从而发布独立包。遇到冲突或测试失败时不推送任何内容，运行标记为失败，此时按下文手动同步。
+自动同步之后，本地继续开发前先 `git pull --rebase`。手动运行时勾选 `sync` 和 `rehearse`，会在当前版本上
+演练一遍，但不推送。
+
+
 每次 upstream 同步都必须按顺序走完这三步。漏掉任一步构建，TUI 集成测试就会
 针对新的 upstream 代码失败。
 
